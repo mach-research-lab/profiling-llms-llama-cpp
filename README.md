@@ -53,6 +53,63 @@ llama-cli -hf ggml-org/gemma-3-1b-it-GGUF
 llama-server -hf ggml-org/gemma-3-1b-it-GGUF
 ```
 
+## Dev environment (Docker)
+
+`.devops/dev.Dockerfile` provides a fully reproducible Ubuntu 24.04 environment that mirrors the profiling server — same OS, same compiler (g++ 13.3.x), same PAPI version, and Python 3.14.3 compiled from source. Use it to run benchmarks and profiling scripts locally without installing anything on the host.
+
+### How it works
+
+The Dockerfile has two stages:
+
+1. **`build`** — starts from `ubuntu:24.04`, installs `build-essential` (g++ 13.3.x), `cmake`, `libpapi-dev` (PAPI headers), then compiles llama.cpp CPU-only with backend dispatch and all CPU variants enabled. Shared libraries (`*.so`) and binaries are collected into staging directories.
+
+2. **`runtime`** — starts from a fresh `ubuntu:24.04`, installs the PAPI runtime (`libpapi7.1t64`, `papi-tools`), builds Python 3.14.3 from source (downloaded from python.org, so the version is pinned and the URL is permanent), then copies the llama.cpp binaries and shared libs from the build stage and runs `pip install -r requirements.txt`.
+
+The Python version is controlled by a build argument and can be overridden at build time:
+
+```sh
+docker build --build-arg PYTHON_VERSION=3.15.0 -f .devops/dev.Dockerfile -t llama-dev .
+```
+
+### Build
+
+```sh
+docker build -f .devops/dev.Dockerfile -t llama-dev .
+```
+
+### Run
+
+```sh
+# Interactive shell
+docker run --rm -it -v /path/to/models:/models llama-dev bash
+
+# Run a benchmark
+docker run --rm -v /path/to/models:/models llama-dev llama-bench -m /models/model.gguf
+
+# Run a Python profiling script
+docker run --rm -v /path/to/models:/models llama-dev python3.14 my_script.py
+```
+
+### PAPI hardware counters
+
+On Linux, pass `--privileged` (or `--cap-add SYS_PERFMON`) to enable hardware performance counters:
+
+```sh
+docker run --rm --privileged -v /path/to/models:/models llama-dev papi_avail
+```
+
+On macOS (Docker Desktop), PAPI is installed and links correctly but hardware counters are not accessible — the code will still compile and run.
+
+### Verify the environment
+
+```sh
+docker run --rm llama-dev cat /etc/os-release       # Ubuntu 24.04
+docker run --rm llama-dev g++ --version              # g++ 13.x
+docker run --rm llama-dev papi_avail                 # PAPI counters
+docker run --rm llama-dev python3.14 --version       # Python 3.14.3
+docker run --rm llama-dev /app/llama-cli --version
+```
+
 ## Description
 
 The main goal of `llama.cpp` is to enable LLM inference with minimal setup and state-of-the-art performance on a wide
