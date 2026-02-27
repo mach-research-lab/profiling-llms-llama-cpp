@@ -7,7 +7,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
-OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plots")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ── Hardware presets ───────────────────────────────────────────────────────────
 HARDWARE = {
