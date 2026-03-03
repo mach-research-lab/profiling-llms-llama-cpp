@@ -8,7 +8,17 @@
 #include <vector>
 #include <iostream>
 #include <cstdio>
+#include <cstring>
+#include <time.h>
 #include <papi.h>
+
+#define MAX_PAPI_EVENTS 4
+
+static inline int64_t now_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
 
 struct callback_data {
     int64_t      t_start;
@@ -16,45 +26,96 @@ struct callback_data {
     int          papi_event_set;
     int          token_index;
     const char * phase;
+    int          n_events;
 };
 
 static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
     auto * data = (callback_data *) user_data;
 
     if (ask) {
-        data->t_start = ggml_time_us();
+        data->t_start = now_ns();
         PAPI_start(data->papi_event_set);
         return true;
     }
 
     if (t->name[0] == '\0') return true;
 
-    long long papi_values[4];
+    long long papi_values[MAX_PAPI_EVENTS] = {0};
     PAPI_stop(data->papi_event_set, papi_values);
 
-    int64_t      duration_us = ggml_time_us() - data->t_start;
+    int64_t      duration_ns = now_ns() - data->t_start;
     size_t       tensor_size = ggml_nbytes(t);
     int64_t      n_elements  = ggml_nelements(t);
     const char * op_name     = ggml_op_name(t->op);
 
-    fprintf(data->out_file, "%s,%d,%s,%s,%.3f,%zu,%ld,%lld,%lld,%lld,%lld\n",
+    fprintf(data->out_file, "%s,%d,%s,%s,%ld,%zu,%ld",
         data->phase,
         data->token_index,
         t->name,
         op_name,
-        duration_us / 1000.0,
+        duration_ns,
         tensor_size,
-        n_elements,
-        papi_values[0],   // PAPI_TOT_CYC
-        papi_values[1],   // PAPI_TOT_INS
-        papi_values[2],   // PAPI_L3_TCM
-        papi_values[3]    // PAPI_VEC_DP
+        n_elements
     );
+    for (int i = 0; i < data->n_events; i++) {
+        fprintf(data->out_file, ",%lld", papi_values[i]);
+    }
+    fprintf(data->out_file, "\n");
 
     return true;
 }
 
+// Parse --papi-events from argv before passing the rest to llama's parser.
+// Removes our custom flag so llama's parser doesn't choke on it.
+static std::vector<std::string> extract_papi_args(int & argc, char ** argv) {
+    std::vector<std::string> events;
+    int write_idx = 1; // argv[0] stays
+
+    for (int i = 1; i < argc; i++) {
+        if (std::strcmp(argv[i], "--papi-events") == 0 && i + 1 < argc) {
+            std::string arg(argv[i + 1]);
+            size_t start = 0;
+            while (start < arg.size()) {
+                size_t end = arg.find(',', start);
+                if (end == std::string::npos) end = arg.size();
+                std::string name = arg.substr(start, end - start);
+                if (!name.empty()) events.push_back(name);
+                start = end + 1;
+            }
+            i++; // skip the value
+        } else {
+            argv[write_idx++] = argv[i];
+        }
+    }
+    argc = write_idx;
+    return events;
+}
+
+static void write_zero_counters(FILE * f, int n_events) {
+    for (int i = 0; i < n_events; i++) {
+        fprintf(f, ",0");
+    }
+    fprintf(f, "\n");
+}
+
 int main(int argc, char ** argv) {
+
+    // --- Extract our custom flag before llama arg parsing ---
+    std::vector<std::string> event_names = extract_papi_args(argc, argv);
+
+    if (event_names.empty()) {
+        fprintf(stderr, "Error: no PAPI events specified.\n");
+        fprintf(stderr, "Usage: %s --papi-events PAPI_TOT_CYC,PAPI_TOT_INS,... [llama args]\n",
+            argv[0]);
+        return 1;
+    }
+    if (event_names.size() > MAX_PAPI_EVENTS) {
+        fprintf(stderr, "Error: maximum %d PAPI events supported, got %zu.\n",
+            MAX_PAPI_EVENTS, event_names.size());
+        return 1;
+    }
+
+    // --- Standard llama arg parsing ---
     common_params params;
 
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
@@ -65,6 +126,7 @@ int main(int argc, char ** argv) {
     llama_backend_init();
     llama_numa_init(params.numa);
 
+    // --- PAPI init ---
     if (PAPI_library_init(PAPI_VER_CURRENT) != PAPI_VER_CURRENT) {
         fprintf(stderr, "PAPI library init error!\n");
         return 1;
@@ -75,33 +137,44 @@ int main(int argc, char ** argv) {
     cb_data.out_file       = nullptr;
     cb_data.token_index    = 0;
     cb_data.phase          = "prefill";
+    cb_data.n_events       = (int)event_names.size();
 
     if (PAPI_create_eventset(&cb_data.papi_event_set) != PAPI_OK) {
-        fprintf(stderr, "PAPI create eventset error!\n"); return 1;
-    }
-    if (PAPI_add_event(cb_data.papi_event_set, PAPI_TOT_CYC) != PAPI_OK) {
-        fprintf(stderr, "PAPI add PAPI_TOT_CYC error!\n"); return 1;
-    }
-    if (PAPI_add_event(cb_data.papi_event_set, PAPI_TOT_INS) != PAPI_OK) {
-        fprintf(stderr, "PAPI add PAPI_TOT_INS error!\n"); return 1;
-    }
-    if (PAPI_add_event(cb_data.papi_event_set, PAPI_L3_TCM) != PAPI_OK) {
-        fprintf(stderr, "PAPI add PAPI_L3_TCM error!\n"); return 1;
-    }
-    if (PAPI_add_event(cb_data.papi_event_set, PAPI_VEC_DP) != PAPI_OK) {
-        fprintf(stderr, "PAPI add PAPI_VEC_DP error!\n"); return 1;
+        fprintf(stderr, "PAPI create eventset error!\n");
+        return 1;
     }
 
-    // Öppna CSV
+    // Dynamically resolve and add events by name
+    for (const auto & name : event_names) {
+        int code = 0;
+        if (PAPI_event_name_to_code(name.c_str(), &code) != PAPI_OK) {
+            fprintf(stderr, "PAPI: unknown event '%s'\n", name.c_str());
+            return 1;
+        }
+        if (PAPI_add_event(cb_data.papi_event_set, code) != PAPI_OK) {
+            fprintf(stderr, "PAPI: failed to add event '%s' (may conflict with other events)\n",
+                name.c_str());
+            return 1;
+        }
+        printf("PAPI: added event %s\n", name.c_str());
+    }
+
+    // --- Open CSV and write dynamic header ---
     cb_data.out_file = fopen("measurements.csv", "w");
     if (!cb_data.out_file) {
         fprintf(stderr, "Failed to open measurements.csv!\n");
         return 1;
     }
-    fprintf(cb_data.out_file,
-        "phase,token_index,tensor_name,op_type,time_ms,size_bytes,n_elements,"
-        "cycles,instructions,l3_misses,vec_dp\n");
 
+    fprintf(cb_data.out_file, "phase,token_index,tensor_name,op_type,time_ns,size_bytes,n_elements");
+    for (const auto & name : event_names) {
+        std::string lower = name;
+        for (auto & c : lower) c = std::tolower(c);
+        fprintf(cb_data.out_file, ",%s", lower.c_str());
+    }
+    fprintf(cb_data.out_file, "\n");
+
+    // --- Hook up callbacks ---
     params.cb_eval           = my_cb_eval;
     params.cb_eval_user_data = &cb_data;
     params.warmup            = false;
@@ -119,28 +192,28 @@ int main(int argc, char ** argv) {
     const int           n_ctx     = llama_n_ctx(ctx);
     const int           n_predict = params.n_predict < 0 ? 256 : params.n_predict;
 
-    // FAS 1: Tokenisering
-    int64_t t_tok_start = ggml_time_us();
+    // PHASE 1: Tokenization
+    int64_t t_tok_start = now_ns();
     const bool add_bos  = llama_vocab_get_add_bos(vocab);
     std::vector<llama_token> tokens = common_tokenize(ctx, params.prompt, add_bos);
-    int64_t t_tok_end   = ggml_time_us();
+    int64_t t_tok_end   = now_ns();
 
     if (tokens.empty()) {
         LOG_ERR("%s : no input tokens\n", __func__);
         return 1;
     }
 
-    // Logga tokenisering (ingen PAPI, för snabbt att mäta)
-    fprintf(cb_data.out_file, "tokenization,0,n/a,n/a,%.3f,%zu,%zu,0,0,0,0\n",
-        (t_tok_end - t_tok_start) / 1000.0,
+    fprintf(cb_data.out_file, "tokenization,0,n/a,n/a,%ld,%zu,%zu",
+        (t_tok_end - t_tok_start),
         tokens.size() * sizeof(llama_token),
         tokens.size()
     );
+    write_zero_counters(cb_data.out_file, cb_data.n_events);
 
-    printf("Tokenization: %zu tokens, %.3f ms\n",
-        tokens.size(), (t_tok_end - t_tok_start) / 1000.0);
+    printf("Tokenization: %zu tokens, %ld ns\n",
+        tokens.size(), (t_tok_end - t_tok_start));
 
-    // FAS 2: Prefill
+    // PHASE 2: Prefill
     cb_data.phase       = "prefill";
     cb_data.token_index = 0;
 
@@ -148,10 +221,9 @@ int main(int argc, char ** argv) {
         LOG_ERR("%s : prefill failed\n", __func__);
         return 1;
     }
-
     printf("Prefill done.\n");
 
-    // FAS 3 + 4: Sampling och Decode
+    // PHASE 3 + 4: Sampling and Decode
     auto * smpl = common_sampler_init(model, params.sampling);
     int n_pos   = (int)tokens.size();
 
@@ -160,16 +232,17 @@ int main(int argc, char ** argv) {
 
     for (int i = 0; i < n_predict; i++) {
 
-        // FAS 3: Sampling
-        int64_t t_samp_start = ggml_time_us();
+        // PHASE 3: Sampling
+        int64_t t_samp_start = now_ns();
         llama_token new_token = common_sampler_sample(smpl, ctx, -1);
         common_sampler_accept(smpl, new_token, true);
-        int64_t t_samp_end = ggml_time_us();
+        int64_t t_samp_end = now_ns();
 
-        fprintf(cb_data.out_file, "sampling,%d,n/a,n/a,%.3f,0,0,0,0,0,0\n",
+        fprintf(cb_data.out_file, "sampling,%d,n/a,n/a,%ld,0,0",
             i + 1,
-            (t_samp_end - t_samp_start) / 1000.0
+            (t_samp_end - t_samp_start)
         );
+        write_zero_counters(cb_data.out_file, cb_data.n_events);
 
         std::string piece = common_token_to_piece(ctx, new_token);
         printf("%s", piece.c_str());
@@ -178,7 +251,7 @@ int main(int argc, char ** argv) {
         if (llama_vocab_is_eog(vocab, new_token)) break;
         if (n_pos >= n_ctx - 1) break;
 
-        // FAS 4: Decode
+        // PHASE 4: Decode
         cb_data.phase       = "decode";
         cb_data.token_index = i + 1;
 
@@ -200,8 +273,3 @@ int main(int argc, char ** argv) {
     printf("Measurements saved to measurements.csv\n");
     return 0;
 }
-
-// Bygg:
-// cmake --build build --target llama-eval-callback -j$(nproc)
-// Kör:
-// ./build/bin/llama-eval-callback -m ./09A/qwen2.5/qwen2.5-1.5b-instruct-q8_0.gguf -p "What is the capital of Sweden?" -n 64
