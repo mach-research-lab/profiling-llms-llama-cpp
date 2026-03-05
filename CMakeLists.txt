@@ -207,6 +207,7 @@ endif()
 
 if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_EXAMPLES)
     add_subdirectory(examples)
+    add_subdirectory(09A-backend)
     add_subdirectory(pocs)
 endif()
 

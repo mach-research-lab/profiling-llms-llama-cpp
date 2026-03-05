@@ -14,7 +14,7 @@ import glob
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 LLAMA_ROOT  = os.path.dirname(SCRIPT_DIR)
-BINARY      = os.path.join(LLAMA_ROOT, "build/bin/llama-eval-callback")
+BINARY      = os.path.join(LLAMA_ROOT, "build/bin/llama-probe")
 MODELS_ROOT = os.path.join(os.path.expanduser("~"), "shared/models")
 
 AVAILABLE_EVENTS = [
