@@ -6,7 +6,7 @@ CREATE TABLE event_item(
     event_operation_type TEXT NOT NULL,
     event_time_microseconds INT NOT NULL,
     event_size_bytes INT NOT NULL,
-    event_n_elements INT NOT NUll,
+    event_n_elements INT NOT NUll
 );
 
 

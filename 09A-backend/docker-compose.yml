@@ -1,15 +1,15 @@
 services:
   db:
     image: postgres:16
-    container_name: myapp-db
+    container_name: toolDBContainer
     environment:
-      POSTGRES_USER: appuser
+      POSTGRES_USER: user
       POSTGRES_PASSWORD: pass
-      POSTGRES_DB: appdb
+      POSTGRES_DB: toolDB
     ports:
-      - "5433:5432"
+      - "5434:5432"
     volumes:
-      - ./001_init:/docker-entrypoint-initdb.d:ro
+      - ./migrations/001-init:/docker-entrypoint-initdb.d:ro
       - pgdata:/var/lib/postgresql/data
 
 
