@@ -1,3 +1,9 @@
+#This script allows for a rapid dev-cycle:
+    # 0: [Develop]
+    # 1: Navigate to /09A-backend/: through powershell
+    # 2: Run .\dev.ps1
+    # 3: See the changes [Go to step 0 and Repeat]
+
 Write-Host "Stopping containers..."
 docker compose down -v
 

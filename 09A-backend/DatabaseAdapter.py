@@ -10,10 +10,34 @@ class DatabaseAdapter:
                 cur.execute("SELECT now()")
                 print(cur.fetchone())
 
-    def insert(self):
-        return 0
+
+    #Send SQL code to the DB (IMPORTANT: currently rather unsafe, due to scope exposure allowing injections)
+    def _to_db(self, SQL: str):
+        with psycopg.connect(self.dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(SQL)
+                return "success"
+
+    #Insert_event inserts one single event into the DB. This is slower than inserting multiple events together.
+    def insert_event(self, event: list[str]) -> None:
+        #SQL code to insert below
+        SQL=("INSERT INTO event_item (event_phase, event_token_index, event_tensor_name, "
+             "event_operation_type, event_time_microseconds, event_size_bytes, event_n_elements) "
+             "VALUES ('"+event[0]+"', "+event[1]+", '"+event[2]+"', '"+event[3]+"', "+event[4]+", "+event[5]+", "+event[6]+")")
+
+        self._to_db(SQL)
+
+        return None
+
 
     def query(self, query):
         return 0
 
+    def insert_n_events(self, eventGroup: list[list[str]]) -> None:
+        SQL = ""
+        for event in eventGroup:
+            SQL = SQL + ("\n INSERT INTO event_item (event_phase, event_token_index, event_tensor_name, "
+                             "event_operation_type, event_time_microseconds, event_size_bytes, event_n_elements) "
+                             "VALUES ('"+event[0]+"', "+event[1]+", '"+event[2]+"', '"+event[3]+"', "+event[4]+", "+event[5]+", "+event[6]+");")
 
+        self._to_db(SQL)
