@@ -304,6 +304,49 @@
     /* Viz panel show/hide */
     .viz-view { display: none; width: 100%; height: 100%; }
     .viz-view.active { display: flex; flex-direction: column; }
+
+
+        /* Generate Roofline button */
+    .btn-generate-roofline {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 20px;
+      font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      color: #22c55e;
+      background: rgba(34, 197, 94, 0.08);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: color 0.15s, background 0.15s, border-color 0.15s, transform 0.1s;
+      letter-spacing: 0.04em;
+    }
+
+    .btn-generate-roofline:hover {
+      color: #4ade80;
+      background: rgba(34, 197, 94, 0.15);
+      border-color: rgba(34, 197, 94, 0.5);
+    }
+
+    .btn-generate-roofline:active {
+      transform: scale(0.97);
+      background: rgba(34, 197, 94, 0.2);
+    }
+
+    /* Centered wrapper inside the viz panel */
+    #view-roofline .generate-roofline {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      flex: 1;
+      color: #6b6b80;
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+    }
   </style>
 </head>
 <body>
@@ -357,7 +400,7 @@
   <div class="dropdown">
     <button class="btn-ghost" onclick="toggleDropdown('dd-counters')">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-      Counters
+      Events
       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
     </button>
     <div class="dropdown-content" id="dd-counters" style="min-width:180px;">
@@ -383,11 +426,11 @@
   <!-- Right side info -->
   <div style="margin-left:auto; display:flex; align-items:center; gap:12px;">
     <span style="font-size:11px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">
-      CPU: <span style="color:#e4e4ed;">NOT IMPLEMENTED YET</span>
+      CPU: <span id="CPU_INFO" style="color:#e4e4ed;"></span>
     </span>
     <div style="width:1px; height:20px; background:#2a2a3a;"></div>
     <span style="font-size:11px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">
-      Arch: <span style="color:#e4e4ed;">NOT IMPLEMENTED YET</span>
+      Architecture: <span id="ARCH_INFO" style="color:#e4e4ed;"></span>
     </span>
   </div>
 </header>
@@ -438,12 +481,6 @@
         <div style="display:flex; align-items:center; justify-content:space-between; padding:6px 16px; border-bottom:1px solid #2a2a3a; flex-shrink:0;">
           <h2 id="viz-title" style="font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:#e4e4ed; font-family:'JetBrains Mono',monospace;">Roofline Model</h2>
           <div style="display:flex; align-items:center; gap:12px;">
-            <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">
-              Peak: <span style="color:#e4e4ed;">150 GFLOP/s</span>
-            </span>
-            <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">
-              BW: <span style="color:#e4e4ed;">16 GB/s</span>
-            </span>
           </div>
         </div>
 
@@ -452,7 +489,12 @@
 
           <!-- Roofline view -->
           <div id="view-roofline" class="viz-view active">
-            <canvas id="roofline-chart" style="max-width:100%; max-height:100%;"></canvas>
+            <div class="generate-roofline">
+              <button class="btn-generate-roofline" onclick="generateRoofline()">
+                ⬡ Generate Roofline
+              </button>
+            </div>
+            <canvas id="roofline-chart" style="max-width:100%; max-height:100%; display:none;"></canvas>
           </div>
 
           <!-- Heatmap view -->
@@ -1092,9 +1134,9 @@ Chart.defaults.font.family = "'JetBrains Mono', monospace"
 Chart.defaults.font.size = 10
 
 // --- Roofline Chart ---
-function initRooflineChart() {
-  const ctx = document.getElementById('roofline-chart').getContext('2d')
-  new Chart(ctx, {
+function initRooflineChart(operationPoints) {
+  const ctx = document.getElementById('roofline-chart').getContext('2d');
+  return new Chart(ctx, {
     type: 'scatter',
     data: {
       datasets: [
@@ -1175,6 +1217,45 @@ function initRooflineChart() {
       }
     }
   })
+}
+
+
+let rooflineChart = null; 
+
+async function generateRoofline() {
+  const canvas = document.getElementById('roofline-chart');
+  const generate_roofline = document.querySelector('#view-roofline .generate-roofline');
+  const btn = generate_roofline.querySelector('.btn-generate-roofline');
+
+  btn.textContent = '⬡ Regenerate Roofline';
+  canvas.style.display = 'block';
+  generate_roofline.style.display = 'flex';
+
+  try {
+    const response = await fetch(`${API_URL}/roofline_data`);
+    const data = await response.json();
+
+    const hardwareKey = 'i7-1185G7';
+    const points = data[hardwareKey];
+    const operationPoints = points.map(p => ({
+      x: p.arithmetic_intensity,
+      y: p.performance_gflops,
+      name: p.label,
+      layer: p.label.includes('optimized') ? 'compute' : 'attn',
+    }));
+
+    // Destroy previous chart instance if it exists
+    if (rooflineChart) {
+      rooflineChart.destroy();
+      rooflineChart = null;
+    }
+
+    rooflineChart = initRooflineChart(operationPoints);
+
+  } catch (err) {
+    console.error('Failed to load roofline data:', err);
+    btn.textContent = '⬡ Retry';
+  }
 }
 
 // --- KV-Cache Chart ---
@@ -1398,8 +1479,21 @@ function renderPerLayerMetrics() {
 // ============================
 // INIT
 // ============================
-
-
+async function get_cpu_info() {
+  try {
+    const response = await fetch(`${API_URL}/cpu_info`);
+    const data = await response.json();
+    const cpu_label = document.getElementById('CPU_INFO');
+    const arch_label = document.getElementById('ARCH_INFO');
+    console.log('CPU Info:', data);
+    cpu_label.textContent = `${data.model_name}`;
+    arch_label.textContent = `${data.architecture}`;
+    
+  } catch (error) {
+    console.error('Error fetching CPU info:', error);
+    return null;
+  }
+}
 
 document.addEventListener('DOMContentLoaded', () => {
   renderMessages()
@@ -1408,10 +1502,10 @@ document.addEventListener('DOMContentLoaded', () => {
   renderLayerExecTable()
   renderCacheMissTable()
   renderPerLayerMetrics()
-  initRooflineChart()
   initLayerExecChart()
   loadModels()
   loadEvents()
+  get_cpu_info()
 })
 </script>
 </body>
