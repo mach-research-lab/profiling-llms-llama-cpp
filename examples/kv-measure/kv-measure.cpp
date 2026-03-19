@@ -33,48 +33,19 @@ int main(int argc, char ** argv) {
     const int           n_ctx     = llama_n_ctx(ctx);
     const int           n_predict = params.n_predict < 0 ? 64 : params.n_predict;
 
-    // Get model parameters
-    // head_dim = n_embd / n_head (number of dimensions per attention head)
-    int32_t n_embd    = llama_model_n_embd(model);
-    int32_t n_head    = llama_model_n_head(model);
-    int32_t n_head_kv = llama_model_n_head_kv(model);
+    // Get model parameters for the info header
     int32_t n_layers  = llama_model_n_layer(model);
-    int32_t head_dim  = n_embd / n_head;
-
-    // Dynamically compute bytes per element for K and V caches.
-    // params.cache_type_k and params.cache_type_v are set by common_params_parse
-    // from the --cache-type-k and --cache-type-v flags (default: GGML_TYPE_F16).
-    //
-    // ggml_type_size() returns bytes per block.
-    // ggml_blck_size() returns elements per block.
-    // bytes per element = type_size / blck_size
-    //
-    // Examples:
-    //   F16  : type_size=2, blck_size=1  -> 2.0 bytes/elem
-    //   F32  : type_size=4, blck_size=1  -> 4.0 bytes/elem
-    //   Q8_0 : type_size=34, blck_size=32 -> 1.0625 bytes/elem  (32 values + 1 scale)
-    //   Q4_0 : type_size=18, blck_size=32 -> 0.5625 bytes/elem
-    double k_bytes_per_elem = (double)ggml_type_size(params.cache_type_k)
-                            / (double)ggml_blck_size(params.cache_type_k);
-    double v_bytes_per_elem = (double)ggml_type_size(params.cache_type_v)
-                            / (double)ggml_blck_size(params.cache_type_v);
+    int32_t n_head_kv = llama_model_n_head_kv(model);
+    int32_t head_dim  = llama_model_n_embd(model) / llama_model_n_head(model);
 
     printf("═══════════════════════════════════════════════════════\n");
     printf("  KV-cache measurement\n");
     printf("═══════════════════════════════════════════════════════\n");
-    printf("  Layers          : %d\n",   n_layers);
-    printf("  KV heads        : %d\n",   n_head_kv);
-    printf("  Head dim        : %d\n",   head_dim);
-    printf("  K type          : %s (%.4f bytes/elem)\n",
-           ggml_type_name(params.cache_type_k), k_bytes_per_elem);
-    printf("  V type          : %s (%.4f bytes/elem)\n",
-           ggml_type_name(params.cache_type_v), v_bytes_per_elem);
-    printf("  K per token     : %.1f bytes\n",
-           n_layers * n_head_kv * head_dim * k_bytes_per_elem);
-    printf("  V per token     : %.1f bytes\n",
-           n_layers * n_head_kv * head_dim * v_bytes_per_elem);
-    printf("  Total per token : %.1f bytes\n",
-           n_layers * n_head_kv * head_dim * (k_bytes_per_elem + v_bytes_per_elem));
+    printf("  Layers   : %d\n", n_layers);
+    printf("  KV heads : %d\n", n_head_kv);
+    printf("  Head dim : %d\n", head_dim);
+    printf("  K type   : %s\n", ggml_type_name(params.cache_type_k));
+    printf("  V type   : %s\n", ggml_type_name(params.cache_type_v));
     printf("═══════════════════════════════════════════════════════\n\n");
 
     // Tokenize prompt
@@ -92,24 +63,20 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "Failed to open kv_sizes.csv\n");
         return 1;
     }
-    fprintf(csv, "phase,token_index,tokens_in_cache,"
-                 "k_bytes,v_bytes,total_bytes,k_kb,v_kb,total_kb\n");
+    fprintf(csv, "phase,token_index,tokens_in_cache,bytes,kb\n");
 
-    // Calculate and write one CSV row
+    // llama_state_seq_get_size returns the real number of bytes used by
+    // the KV cache for sequence 0, including all internal metadata and padding.
     auto write_row = [&](const char * phase, int token_idx, int tokens_in_cache) {
-        double k_b = tokens_in_cache * n_layers * n_head_kv * head_dim * k_bytes_per_elem;
-        double v_b = tokens_in_cache * n_layers * n_head_kv * head_dim * v_bytes_per_elem;
-        double tot = k_b + v_b;
+        size_t bytes = llama_state_seq_get_size(ctx, 0);
 
-        fprintf(csv, "%s,%d,%d,%.0f,%.0f,%.0f,%.2f,%.2f,%.2f\n",
+        fprintf(csv, "%s,%d,%d,%zu,%.2f\n",
                 phase, token_idx, tokens_in_cache,
-                k_b, v_b, tot,
-                k_b / 1e3, v_b / 1e3, tot / 1e3);
+                bytes, (double)bytes / 1e3);
 
-        printf("  [%-8s token %3d]  cache: %4d tokens  "
-               "K: %7.2f KB  V: %7.2f KB  Total: %7.2f KB\n",
+        printf("  [%-8s token %3d]  tokens: %4d  size: %7.2f KB\n",
                phase, token_idx, tokens_in_cache,
-               k_b / 1e3, v_b / 1e3, tot / 1e3);
+               (double)bytes / 1e3);
     };
 
     // Prefill: process all prompt tokens in one batch
@@ -118,13 +85,12 @@ int main(int argc, char ** argv) {
         LOG_ERR("%s: prefill failed\n", __func__);
         return 1;
     }
-    // All prompt tokens are now in the cache
     write_row("prefill", 0, (int)tokens.size());
 
     // Decode: generate one token at a time
     printf("\nDecode:\n");
     auto * smpl  = common_sampler_init(model, params.sampling);
-    int    n_pos = (int)tokens.size(); // number of tokens currently in cache
+    int    n_pos = (int)tokens.size();
 
     for (int i = 0; i < n_predict; i++) {
         llama_token new_token = common_sampler_sample(smpl, ctx, -1);
@@ -144,7 +110,7 @@ int main(int argc, char ** argv) {
             break;
         }
 
-        n_pos++; // one new token added to the cache
+        n_pos++;
         write_row("decode", i + 1, n_pos);
     }
 
@@ -188,21 +154,7 @@ int main(int argc, char ** argv) {
  *  phase           — prefill or decode
  *  token_index     — token number
  *  tokens_in_cache — number of tokens currently in the KV cache
- *  k_bytes         — K cache size in bytes
- *  v_bytes         — V cache size in bytes
- *  total_bytes     — K + V total in bytes
- *  k_kb            — K cache in KB
- *  v_kb            — V cache in KB
- *  total_kb        — total in KB
- *
- *  Growth is linear: each new token adds
- *    n_layers * n_kv_heads * head_dim * elem_size bytes
- *  for K and the same for V.
- *
- *  elem_size is computed dynamically from --cache-type-k / --cache-type-v:
- *    f16   -> 2.0000 bytes/elem  (default)
- *    q8_0  -> 1.0625 bytes/elem
- *    q4_0  -> 0.5625 bytes/elem
- *    f32   -> 4.0000 bytes/elem
+ *  bytes           — KV cache size from llama_state_seq_get_size
+ *  kb              — bytes in KB
  * ═══════════════════════════════════════════════════════════════════
  */
