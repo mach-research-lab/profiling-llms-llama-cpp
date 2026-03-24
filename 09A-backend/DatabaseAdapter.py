@@ -3,7 +3,10 @@ import psycopg
 class DatabaseAdapter:
     def __init__(self, url):                     #Connects to the database
         self.dsn = url
+        self.events = eventStructure()
         print("DSN: " + self.dsn)
+
+
 
         with psycopg.connect(self.dsn) as conn:
             with conn.cursor() as cur:
@@ -41,3 +44,37 @@ class DatabaseAdapter:
                              "VALUES ('"+event[0]+"', "+event[1]+", '"+event[2]+"', '"+event[3]+"', "+event[4]+", "+event[5]+", "+event[6]+");")
 
         self._to_db(SQL)
+
+    def store_item(self, item0: str, item1: str, item2: str, item3: str, item4: str, item5: str, item6: str):
+        eventStructure.insert(item0, item1, item2, item3, item4, item5, item6)
+
+
+    def insert_stored_items(self, event: list[str]):
+        self.storedItems.append(event)
+
+
+class eventStructure():
+    def __init__(self):
+        self.eventMap = {}
+
+    def insert(self, item0: str, item1: str, item2: str, item3: str, item4: str, item5: str, item6: str):
+        self.eventMap[len(self.eventMap)] = {
+            "event_order": len(self.eventMap),
+            "event_phase": item0,
+            "event_token_index": item1,
+            "event_tensor_name": item2,
+            "event_operation_type": item3,
+            "event_time_microseconds": item4,
+            "event_size_bytes": item5,
+            "event_n_elements": item6,
+        }
+
+
+    def clear(self):
+        self.eventMap = {}
+
+    def get(self, index: int):
+        return self.eventMap[index]
+
+    def getAll(self):
+        return self.eventMap
