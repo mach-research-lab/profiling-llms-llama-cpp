@@ -159,20 +159,12 @@ int main(int argc, char ** argv) {
         printf("PAPI: added event %s\n", name.c_str());
     }
 
-    // --- Open CSV and write dynamic header ---
+    // --- Open CSV file ---
     cb_data.out_file = fopen("measurements.csv", "w");
     if (!cb_data.out_file) {
         fprintf(stderr, "Failed to open measurements.csv!\n");
         return 1;
     }
-
-    fprintf(cb_data.out_file, "phase,token_index,tensor_name,op_type,time_ns,size_bytes,n_elements");
-    for (const auto & name : event_names) {
-        std::string lower = name;
-        for (auto & c : lower) c = std::tolower(c);
-        fprintf(cb_data.out_file, ",%s", lower.c_str());
-    }
-    fprintf(cb_data.out_file, "\n");
 
     // --- Hook up callbacks ---
     params.cb_eval           = my_cb_eval;
@@ -191,6 +183,22 @@ int main(int argc, char ** argv) {
     const llama_vocab * vocab     = llama_model_get_vocab(model);
     const int           n_ctx     = llama_n_ctx(ctx);
     const int           n_predict = params.n_predict < 0 ? 256 : params.n_predict;
+
+    // --- Write model metadata as comments (AFTER variables are initialized) ---
+    fprintf(cb_data.out_file, "# Model Metadata\n");
+    fprintf(cb_data.out_file, "# n_ctx: %d\n", n_ctx);
+    fprintf(cb_data.out_file, "# n_predict: %d\n", n_predict);
+    fprintf(cb_data.out_file, "# model_size_bytes: %zu\n", llama_model_size(model));
+    fprintf(cb_data.out_file, "# n_params: %zu\n", llama_model_n_params(model));
+
+    // --- Write CSV header ---
+    fprintf(cb_data.out_file, "phase,token_index,tensor_name,op_type,time_ns,size_bytes,n_elements");
+    for (const auto & name : event_names) {
+        std::string lower = name;
+        for (auto & c : lower) c = std::tolower(c);
+        fprintf(cb_data.out_file, ",%s", lower.c_str());
+    }
+    fprintf(cb_data.out_file, "\n");
 
     // PHASE 1: Tokenization
     int64_t t_tok_start = now_ns();

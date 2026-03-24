@@ -18,6 +18,9 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 from analysis import plot_roofline, HARDWARE
+from data_processor import parse_measurements, ProfilingData, get_summary_stats
+from visualization import generate_all_visualizations
+from metrics import calculate_all_metrics
 
 app = FastAPI()
 
@@ -362,6 +365,284 @@ async def get_measurements():
         raise HTTPException(status_code=404, detail="measurements.csv not found. Run profiling first.")
 
     return FileResponse(csv_path, media_type="text/csv")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NEW: Hierarchical Analysis Endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/hierarchical-analysis")
+async def get_hierarchical_analysis():
+    """
+    Generate comprehensive hierarchical analysis from measurements.csv.
+
+    Returns all 5 levels of visualization plus structured metrics.
+    """
+    csv_path = os.path.join(LLAMA_ROOT, "measurements.csv")
+
+    if not os.path.isfile(csv_path):
+        raise HTTPException(
+            status_code=404,
+            detail="measurements.csv not found. Run profiling first using /profile endpoint."
+        )
+
+    try:
+        # Parse measurements
+        data = parse_measurements(csv_path)
+
+        # Generate all visualizations
+        plots = generate_all_visualizations(data, PLOTS_DIR)
+
+        # Get summary statistics
+        summary = get_summary_stats(data)
+
+        # Convert plot paths to URLs
+        plot_urls = {
+            level: f"/plots/{os.path.basename(path)}"
+            for level, path in plots.items()
+        }
+
+        return {
+            "success": True,
+            "plots": plot_urls,
+            "summary": summary,
+            "levels": {
+                "top_view": data.top_view,
+                "phase_view": data.phase_view,
+                "block_view": data.block_view,
+                "attention_mlp_view": data.attention_mlp_view,
+                "layer_view_sample": data.layer_view[:10] if data.layer_view else [],  # Sample
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating hierarchical analysis: {str(e)}"
+        )
+
+
+@app.get("/metrics/{level}")
+async def get_metrics_by_level(level: str):
+    """
+    Get metrics for a specific hierarchy level.
+
+    Args:
+        level: One of 'top', 'phase', 'block', 'attention', 'layer'
+    """
+    csv_path = os.path.join(LLAMA_ROOT, "measurements.csv")
+
+    if not os.path.isfile(csv_path):
+        raise HTTPException(status_code=404, detail="measurements.csv not found")
+
+    valid_levels = ['top', 'phase', 'block', 'attention', 'layer']
+    if level not in valid_levels:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid level '{level}'. Must be one of: {', '.join(valid_levels)}"
+        )
+
+    try:
+        data = parse_measurements(csv_path)
+
+        level_data = {
+            'top': data.top_view,
+            'phase': data.phase_view,
+            'block': data.block_view,
+            'attention': data.attention_mlp_view,
+            'layer': data.layer_view[:50],  # Limit to first 50 for performance
+        }
+
+        return {
+            "success": True,
+            "level": level,
+            "data": level_data[level]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ReportRequest(BaseModel):
+    include_roofline: bool = True
+    hardware: str = "i7-1185G7"
+    roofline_style: str = "academic"
+
+
+@app.post("/generate-report")
+async def generate_report(request: ReportRequest):
+    """
+    Generate comprehensive HTML/JSON report with all visualizations.
+
+    Args:
+        request: Configuration for report generation
+    """
+    csv_path = os.path.join(LLAMA_ROOT, "measurements.csv")
+
+    if not os.path.isfile(csv_path):
+        raise HTTPException(status_code=404, detail="measurements.csv not found")
+
+    try:
+        # Parse measurements
+        data = parse_measurements(csv_path)
+
+        # Generate all visualizations
+        plots = generate_all_visualizations(data, PLOTS_DIR)
+
+        # Optionally generate roofline plot
+        roofline_url = None
+        if request.include_roofline and request.hardware in HARDWARE:
+            hw = HARDWARE[request.hardware]
+
+            # Create sample kernel points (this would ideally come from actual metrics)
+            # For now, use a simplified approach
+            import time
+            timestamp = int(time.time())
+            roofline_filename = f"roofline_{request.hardware}_{timestamp}.png"
+            roofline_path = os.path.join(PLOTS_DIR, roofline_filename)
+
+            # Use top-level metrics to create roofline point
+            fig, ax = plot_roofline(
+                title=f"Roofline — {hw['label']}",
+                application_points=[],  # Empty for now
+                style=request.roofline_style,
+                hw=hw,
+            )
+
+            fig.savefig(roofline_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+
+            roofline_url = f"/plots/{roofline_filename}"
+
+        # Build comprehensive report
+        report = {
+            "success": True,
+            "timestamp": csv_path,
+            "summary": get_summary_stats(data),
+            "visualizations": {
+                "hierarchical": {
+                    level: f"/plots/{os.path.basename(path)}"
+                    for level, path in plots.items()
+                },
+                "roofline": roofline_url,
+            },
+            "metrics": {
+                "top_view": data.top_view,
+                "phase_view": data.phase_view,
+                "block_summary": {
+                    "num_blocks": len(data.block_view),
+                    "total_runtime_sec": sum(
+                        b['runtime_sec'] for b in data.block_view.values()
+                    ),
+                },
+                "attention_mlp_summary": {
+                    "num_blocks_analyzed": len(data.attention_mlp_view),
+                },
+            },
+            "questions_answered": {
+                "total_time_and_energy": {
+                    "total_runtime_sec": data.top_view.get('total_runtime_sec', 0),
+                    "total_energy_joules": data.top_view.get('total_energy_joules'),
+                },
+                "prefill_decode_comparison": {
+                    "available": 'prefill' in data.phase_view and 'decode' in data.phase_view,
+                    "phases": list(data.phase_view.keys()),
+                },
+                "most_expensive_blocks": {
+                    "top_3": sorted(
+                        data.block_view.items(),
+                        key=lambda x: x[1]['runtime_sec'],
+                        reverse=True
+                    )[:3] if data.block_view else []
+                },
+                "attention_vs_mlp_bottleneck": {
+                    "analysis_available": len(data.attention_mlp_view) > 0,
+                    "num_blocks": len(data.attention_mlp_view),
+                },
+                "compute_vs_memory_bottleneck": {
+                    "note": "Requires roofline analysis - check cache misses and arithmetic intensity",
+                    "total_cache_misses": data.top_view.get('total_cache_misses', 0),
+                },
+            }
+        }
+
+        return report
+
+    except Exception as e:
+        import traceback
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating report: {str(e)}\n{traceback.format_exc()}"
+        )
+
+
+@app.get("/visualization-levels")
+async def get_visualization_levels():
+    """
+    Get information about available visualization levels.
+    """
+    return {
+        "levels": [
+            {
+                "id": "top_view",
+                "name": "Level 1: Top View",
+                "description": "Whole LLM as one box - total runtime, tokens, throughput, memory",
+                "metrics": [
+                    "Total runtime",
+                    "Input/output tokens",
+                    "Throughput (tokens/s)",
+                    "Model size",
+                    "Cache misses"
+                ]
+            },
+            {
+                "id": "phase_view",
+                "name": "Level 2: Phase View",
+                "description": "Prefill vs Decode comparison",
+                "metrics": [
+                    "Time per phase",
+                    "Bytes moved",
+                    "IPC",
+                    "LLC misses",
+                    "Operation type distribution"
+                ]
+            },
+            {
+                "id": "block_view",
+                "name": "Level 3: Decoder Block View",
+                "description": "Metrics for each decoder block",
+                "metrics": [
+                    "Runtime per block",
+                    "Bytes moved",
+                    "Cache behavior (L1/L2/L3)",
+                    "Share of total runtime"
+                ]
+            },
+            {
+                "id": "attention_mlp_view",
+                "name": "Level 4: Attention vs MLP",
+                "description": "Component breakdown within each decoder block",
+                "metrics": [
+                    "Attention runtime",
+                    "MLP runtime",
+                    "Bytes moved per component",
+                    "IPC comparison"
+                ]
+            },
+            {
+                "id": "layer_view",
+                "name": "Level 5: Layer View",
+                "description": "Individual operations with full detail",
+                "metrics": [
+                    "Per-operation runtime",
+                    "Bytes moved",
+                    "Cache behavior",
+                    "IPC",
+                    "Operation type"
+                ]
+            }
+        ]
+    }
 
 
 if __name__ == "__main__":
