@@ -284,4 +284,5 @@ configure_file(cmake/llama.pc.in
 
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/llama.pc"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+add_subdirectory(examples/kv-measure)
 add_subdirectory(examples/llama-energy)
