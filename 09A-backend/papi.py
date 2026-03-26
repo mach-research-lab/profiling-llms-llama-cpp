@@ -11,56 +11,14 @@ import subprocess
 import sys
 import os
 import glob
+from event_retriever import get_available_events
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 LLAMA_ROOT  = os.path.dirname(SCRIPT_DIR)
 BINARY      = os.path.join(LLAMA_ROOT, "build/bin/llama-probe")
 MODELS_ROOT = os.path.join(os.path.expanduser("~"), "shared/models")
 
-AVAILABLE_EVENTS = [
-    ("PAPI_TOT_CYC",  "Total cycles"),
-    ("PAPI_TOT_INS",  "Instructions completed"),
-    ("PAPI_L1_DCM",   "L1 data cache misses"),
-    ("PAPI_L1_ICM",   "L1 instruction cache misses"),
-    ("PAPI_L1_TCM",   "L1 cache misses (total)"),
-    ("PAPI_L2_DCM",   "L2 data cache misses"),
-    ("PAPI_L2_ICM",   "L2 instruction cache misses"),
-    ("PAPI_L2_TCM",   "L2 cache misses (total)"),
-    ("PAPI_L3_TCM",   "L3 cache misses (total)"),
-    ("PAPI_L3_LDM",   "L3 load misses"),
-    ("PAPI_L2_LDM",   "L2 load misses"),
-    ("PAPI_L2_DCA",   "L2 data cache accesses"),
-    ("PAPI_L3_DCA",   "L3 data cache accesses"),
-    ("PAPI_L2_DCR",   "L2 data cache reads"),
-    ("PAPI_L3_DCR",   "L3 data cache reads"),
-    ("PAPI_L2_TCA",   "L2 total cache accesses"),
-    ("PAPI_L3_TCA",   "L3 total cache accesses"),
-    ("PAPI_L2_TCR",   "L2 total cache reads"),
-    ("PAPI_FP_INS",   "Floating point instructions"),
-    ("PAPI_FP_OPS",   "Floating point operations"),
-    ("PAPI_SP_OPS",   "FP single precision (scaled)"),
-    ("PAPI_DP_OPS",   "FP double precision (scaled)"),
-    ("PAPI_VEC_SP",   "Single precision vector/SIMD"),
-    ("PAPI_VEC_DP",   "Double precision vector/SIMD"),
-    ("PAPI_VEC_INS",  "Vector/SIMD instructions"),
-    ("PAPI_LD_INS",   "Load instructions"),
-    ("PAPI_SR_INS",   "Store instructions"),
-    ("PAPI_LST_INS",  "Load/store instructions"),
-    ("PAPI_BR_INS",   "Branch instructions"),
-    ("PAPI_BR_CN",    "Conditional branches"),
-    ("PAPI_BR_TKN",   "Conditional branches taken"),
-    ("PAPI_BR_NTK",   "Conditional branches not taken"),
-    ("PAPI_BR_MSP",   "Branch mispredictions"),
-    ("PAPI_BR_PRC",   "Branches correctly predicted"),
-    ("PAPI_BR_UCN",   "Unconditional branches"),
-    ("PAPI_CA_SHR",   "Requests for exclusive access to shared cache line"),
-    ("PAPI_L2_ICH",   "L2 instruction cache hits"),
-    ("PAPI_L2_ICA",   "L2 instruction cache accesses"),
-    ("PAPI_L3_ICA",   "L3 instruction cache accesses"),
-    ("PAPI_L2_ICR",   "L2 instruction cache reads"),
-    ("PAPI_L3_ICR",   "L3 instruction cache reads"),
-    ("PAPI_REF_CYC",  "Reference clock cycles"),
-]
+AVAILABLE_EVENTS = get_available_events()
 
 
 def find_models():
@@ -75,12 +33,12 @@ def select_model():
         sys.exit(1)
 
     print("\n╔══════════════════════════════════════════════════════════════════════╗")
-    print("║                        Available models                            ║")
+    print("║                        Available models                              ║")
     print("╠══════════════════════════════════════════════════════════════════════╣")
     for i, path in enumerate(models):
         rel = os.path.relpath(path, MODELS_ROOT)
         display = rel if len(rel) <= 68 else "..." + rel[-65:]
-        print(f"║  {i+1:2d}. {display:<68}║")
+        print(f"║  {i+1:2d}. {display:<64}║")
     print("╚══════════════════════════════════════════════════════════════════════╝")
 
     print("\nSelect a model (enter number):")
@@ -101,12 +59,12 @@ def select_model():
 
 
 def print_events():
-    print("\n╔══════════════════════════════════════════════════════════════╗")
-    print("║              Available PAPI events                         ║")
-    print("╠══════════════════════════════════════════════════════════════╣")
+    print("\n╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+    print("║                                                  Available PAPI events                                                  ║")
+    print("╠═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╣")
     for i, (name, desc) in enumerate(AVAILABLE_EVENTS):
-        print(f"║  {i+1:2d}. {name:<14} — {desc:<38}║")
-    print("╚══════════════════════════════════════════════════════════════╝")
+        print(f"║  {i+1:2d}. {name:<12} — {desc:<100}║")
+    print("╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
 
 
 def select_events():
