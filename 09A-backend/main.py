@@ -10,17 +10,14 @@ databaseAdapter = DatabaseAdapter("postgresql://user:pass@localhost:5434/toolDB"
 with open("testdata/test-data.csv", "r", newline="") as file:
     reader = csv.reader(file)
 
+
     i = 0
-
-    eventGroup: list[list[str]] = []
-
     print(str(datetime.datetime.now()) + "\n" + "total amount: "  + str(i))
     for row in reader:
-        eventGroup.append(row)
+        databaseAdapter.store_event(row[0], row[1], row[2], row[3], row[4], row[5], row[6])
         i = i + 1
 
-    databaseAdapter.insert_n_events(eventGroup)
-    eventGroup.clear()
+    databaseAdapter.push_stored_events_to_db()
     print(str(datetime.datetime.now()) + "\n" + "total amount: "  + str(i))
 
 
