@@ -18,6 +18,7 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 from analysis import plot_roofline, HARDWARE
+from event_retriever import get_available_events
 
 app = FastAPI()
 
@@ -37,21 +38,7 @@ MODELS_ROOT = os.path.join(os.path.expanduser("~"), "shared/models")
 PLOTS_DIR = os.path.join(SCRIPT_DIR, "plots")
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
-AVAILABLE_EVENTS = [
-    ("PAPI_TOT_CYC", "Total cycles"),
-    ("PAPI_TOT_INS", "Instructions completed"),
-    ("PAPI_L1_DCM", "L1 data cache misses"),
-    ("PAPI_L1_ICM", "L1 instruction cache misses"),
-    ("PAPI_L1_TCM", "L1 cache misses (total)"),
-    ("PAPI_L2_DCM", "L2 data cache misses"),
-    ("PAPI_L2_ICM", "L2 instruction cache misses"),
-    ("PAPI_L2_TCM", "L2 cache misses (total)"),
-    ("PAPI_L3_TCM", "L3 cache misses (total)"),
-    ("PAPI_L3_LDM", "L3 load misses"),
-    ("PAPI_FP_OPS", "Floating point operations"),
-    ("PAPI_VEC_INS", "Vector/SIMD instructions"),
-]
-
+AVAILABLE_EVENTS = get_available_events()
 
 class ModelInfo(BaseModel):
     path: str
