@@ -207,7 +207,6 @@ endif()
 
 if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_EXAMPLES)
     add_subdirectory(examples)
-    add_subdirectory(09A-backend)
     add_subdirectory(pocs)
 endif()
 
@@ -284,5 +283,13 @@ configure_file(cmake/llama.pc.in
 
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/llama.pc"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
-add_subdirectory(examples/kv-measure)
-add_subdirectory(examples/llama-energy)
+
+# ------- Added by 09A ----------
+
+option(LLAMA_BUILD_09A "09A: build measuring tools" ON)
+
+if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_09A)
+    add_subdirectory(09A-backend/llama-measuring)
+endif()
+
+#--------------------------------
