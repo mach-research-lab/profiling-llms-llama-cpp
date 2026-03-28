@@ -12,3 +12,7 @@ __pycache__/
 
 .venv/
 
+.devops/
+.gemini/
+
+
