@@ -23,7 +23,7 @@ if [ "$ready" != true ]; then
 fi
 
 echo "Running main.py..."
-python ./main.py
+python3 ./main.py
 
 echo "Opening psql..."
 docker compose exec db psql -U appuser -d appdb
