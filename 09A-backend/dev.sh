@@ -10,7 +10,7 @@ docker compose up -d
 echo "Waiting for Postgres..."
 ready=false
 for i in $(seq 1 90); do
-    if docker compose exec -T db pg_isready -U appuser -d appdb >/dev/null 2>&1; then
+    if docker compose exec -T db pg_isready -U user -d toolDB >/dev/null 2>&1; then
         ready=true
         break
     fi
@@ -26,5 +26,5 @@ echo "Running main.py..."
 python3 ./main.py
 
 echo "Opening psql..."
-docker compose exec db psql -U appuser -d appdb
+docker compose exec db psql -U user -d toolDB
 
