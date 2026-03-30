@@ -27,5 +27,12 @@ sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin dock
 echo "Docker installation status: "
 sudo systemctl status docker
 
+#---
+sudo usermod -aG docker $USER
+newgrp docker
+#---
+
+
 echo "Starting docker: "
 sudo systemctl start docker
+
