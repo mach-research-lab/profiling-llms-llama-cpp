@@ -36,3 +36,4 @@ newgrp docker
 echo "Starting docker: "
 sudo systemctl start docker
 
+#Install psycopg?
