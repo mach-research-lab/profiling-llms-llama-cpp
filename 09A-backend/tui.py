@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""
+Interactive tool for selecting PAPI events and running llama-eval-callback.
+Run from the 09A-backend directory inside the llama.cpp repo.
+
+The C++ binary is compiled once. This script selects events at runtime
+and passes them via --papi-events.
+"""
+
+import subprocess
+import sys
+import os
+import glob
+from event_retriever import get_available_events
+
+SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
+LLAMA_ROOT  = os.path.dirname(SCRIPT_DIR)
+MODELS_ROOT = os.path.join(os.path.expanduser("~"), "shared/models")
+
+AVAILABLE_EVENTS = get_available_events()
+
+#Used for selecting run type (PAPI events, energy, KV cache or everything)
+def select_run_type():
+    run_types = {
+        "1": ("single", "PAPI events measurement (single batch)"),
+        "2": ("energy", "Energy measurement"),
+        "3": ("kv",     "KV cache footprint"),
+        "4": ("all",    "Run all (Multi-batch with event groups)"),
+    }
+
+    print("\nSelect run type:")
+    for key, (_, desc) in run_types.items():
+        print(f"  {key}. {desc}")
+
+    while True:
+        raw = input("> ").strip()
+        if raw not in run_types:
+            print("Invalid choice. Enter 1, 2, 3, or 4.")
+            continue
+
+        key, desc = run_types[raw]
+        print(f"\n  ✓ {desc}")
+        confirm = input("Confirm? (y/n): ").strip().lower()
+        if confirm == "y":
+            return key
+
+
+#--------- PAPI events measurement ---------
+
+def print_events():
+    print("\n╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+    print("║                                                  Available PAPI events                                                  ║")
+    print("╠═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╣")
+    for i, (name, desc) in enumerate(AVAILABLE_EVENTS):
+        print(f"║  {i+1:2d}. {name:<12} — {desc:<100}║")
+    print("╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
+
+def select_events():
+    print_events()
+    print("\nSelect up to 4 events (enter numbers separated by commas, e.g. 1,2,8,24):")
+    while True:
+        raw = input("> ").strip()
+        parts = [p.strip() for p in raw.split(",")]
+        if len(parts) > 4:
+            print("Maximum 4 events! Try again.")
+            continue
+        try:
+            indices = [int(p) - 1 for p in parts]
+        except ValueError:
+            print("Invalid format. Use numbers separated by commas.")
+            continue
+        if any(i < 0 or i >= len(AVAILABLE_EVENTS) for i in indices):
+            print(f"Invalid numbers. Choose between 1 and {len(AVAILABLE_EVENTS)}.")
+            continue
+        selected = [AVAILABLE_EVENTS[i] for i in indices]
+        print("\nYou selected:")
+        for name, desc in selected:
+            print(f"  ✓ {name} — {desc}")
+        confirm = input("\nConfirm? (y/n): ").strip().lower()
+        if confirm == "y":
+            return selected
+
+#--------- KV cache footprint  ---------
+def detect_cache_type(model_path: str) -> str:
+    """
+    Detect KV cache type from the model filename.
+    Maps common quantization suffixes to llama.cpp cache type names.
+    Falls back to f16 if nothing matches.
+    """
+    name = os.path.basename(model_path).lower()
+
+    # Map filename patterns to cache type
+    patterns = [
+        ("q8_0",  "q8_0"),
+        ("q6_k",  "q8_0"),   # Q6_K weights → use q8_0 cache (best match)
+        ("q4_k",  "q8_0"),   # Q4_K weights → use q8_0 cache
+        ("q4_0",  "q4_0"),
+        ("q5_0",  "q8_0"),
+        ("q5_k",  "q8_0"),
+        ("f32",   "f32"),
+        ("fp32",  "f32"),
+        ("f16",   "f16"),
+        ("fp16",  "f16"),
+    ]
+
+    for pattern, cache_type in patterns:
+        if pattern in name:
+            return cache_type
+
+    return "f16"  # default
+
+
+
+#--------- Common functions ---------
+def find_models():
+    pattern = os.path.join(MODELS_ROOT, "**", "*.gguf")
+    return sorted(glob.glob(pattern, recursive=True))
+
+def select_model():
+    models = find_models()
+    if not models:
+        print(f"No .gguf models found in {MODELS_ROOT}")
+        sys.exit(1)
+
+    print("\n╔══════════════════════════════════════════════════════════════════════╗")
+    print("║                        Available models                              ║")
+    print("╠══════════════════════════════════════════════════════════════════════╣")
+    for i, path in enumerate(models):
+        rel = os.path.relpath(path, MODELS_ROOT)
+        display = rel if len(rel) <= 68 else "..." + rel[-65:]
+        print(f"║  {i+1:2d}. {display:<64}║")
+    print("╚══════════════════════════════════════════════════════════════════════╝")
+
+    print("\nSelect a model (enter number):")
+    while True:
+        raw = input("> ").strip()
+        if not raw.isdigit():
+            print("Invalid input. Enter a number.")
+            continue
+        idx = int(raw) - 1
+        if idx < 0 or idx >= len(models):
+            print(f"Choose between 1 and {len(models)}.")
+            continue
+        selected = models[idx]
+        print(f"\n  ✓ {os.path.relpath(selected, MODELS_ROOT)}")
+        confirm = input("Confirm? (y/n): ").strip().lower()
+        if confirm == "y":
+            return selected
+
+def check_binary(binary_path):
+    if not os.path.isfile(binary_path):
+        return False
+    else:
+        print(f"\n  ✓ Binary found: {binary_path}")
+        return True
+
+#Used for running llama-papi
+def run_single_papi(model_path, events, prompt, n_predict, binary_path):
+    event_names = [e[0] for e in events]
+    events_arg = ",".join(event_names)
+
+    cmd = [
+        binary_path,
+        "--papi-events", events_arg,
+        "-m", model_path,
+        "-p", prompt,
+        "-n", str(n_predict),
+        "--temp", "0",  # fixed temp for consistent measurements
+        "--log-disable",
+    ]
+
+    print(f"\nRunning: {' '.join(cmd)}\n")
+    subprocess.run(cmd, cwd=LLAMA_ROOT)
+
+#Used for running kv-measure
+def run_kv_measurement(model_path, prompt, n_predict, cache_type, binary_path):
+    cmd = [
+        binary_path,
+        "-m", model_path,
+        "-p", prompt,
+        "-n", str(n_predict),
+        "--cache-type-k", cache_type,
+        "--cache-type-v", cache_type,
+        "--temp", "0",  # fixed temp for consistent measurements
+        "--log-disable",
+    ]
+
+    print(f"\nRunning: {' '.join(cmd)}\n")
+    result = subprocess.run(cmd, cwd=LLAMA_ROOT)
+
+    if result.returncode != 0:
+        print(f"\n  ✗ kv-measure failed (returncode {result.returncode})")
+        sys.exit(1)
+
+    csv_path = os.path.join(LLAMA_ROOT, "kv_sizes.csv")
+    if os.path.isfile(csv_path):
+        print(f"\n  ✓ Results saved to: {csv_path}")
+    else:
+        print("\n  ✗ kv_sizes.csv not found after run.")
+
+#Used for running llama-energy
+def run_energy(model_path, prompt, n_predict, binary_path):
+    cmd = [
+        binary_path,
+        "-m", model_path,
+        "-p", prompt,
+        "-n", str(n_predict),
+        "--temp", "0",  # fixed temp for consistent measurements
+        "--log-disable",
+    ]
+
+    print(f"\nRunning: {' '.join(cmd)}\n")
+    result = subprocess.run(cmd, cwd=LLAMA_ROOT)
+
+    if result.returncode != 0:
+        print(f"\n  ✗ llama-energy failed (returncode {result.returncode})")
+        sys.exit(1)
+
+    csv_path = os.path.join(LLAMA_ROOT, "energy.csv")
+    if os.path.isfile(csv_path):
+        print(f"\n  ✓ Results saved to: {csv_path}")
+    else:
+        print("\n  ✗ energy.csv not found after run.")
+
+
+def main():
+    print("═" * 66)
+    print("   llama.cpp Profiler")
+    print("═" * 66)
+
+    binary_path = None
+
+    run_type = select_run_type()
+    print(run_type)
+    #Add path to the correct binary based on the run type
+    if run_type == "energy":
+        binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-energy")
+    elif run_type == "kv":
+        binary_path = os.path.join(LLAMA_ROOT, "build/bin/kv-measure")
+    elif run_type == "single":
+        binary_path  = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
+    elif run_type == "all":
+        binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
+    
+    # Check if the selected binary exists
+    if(not check_binary(binary_path)):
+        print(f"Binary not found: {binary_path}")
+        print("Please compile binaries in /09A-backend/llama-measuring first.")
+        sys.exit(1)
+
+    model_path = select_model()
+
+    #If single batch with PAPI events, allow event selection. Otherwise skip to prompt input.
+    events = []
+    if run_type == "single":
+        events = select_events()
+
+    #If KV cache measurement, detect cache type from model name. Otherwise skip to prompt input.
+    cache_type = None
+    if run_type == "kv":
+        cache_type = detect_cache_type(model_path)
+        print(f"\nDetected KV cache type: {cache_type}")
+
+    # ---- COMMON PROMPT AND N_PREDICT INPUT ----
+    print("\nEnter your prompt:")
+    prompt = input("> ").strip()
+    if not prompt:
+        prompt = "What is the capital of Sweden?"
+
+    print("How many tokens to generate? (default: 64)")
+    raw = input("> ").strip()
+    n_predict = int(raw) if raw.isdigit() else 64  
+
+    if run_type == "single":
+        run_single_papi(model_path, events, prompt, n_predict, binary_path)
+    elif run_type == "kv":
+        run_kv_measurement(model_path, prompt, n_predict, cache_type, binary_path)
+    elif run_type == "energy":
+        run_energy(model_path, prompt, n_predict, binary_path)
+    elif run_type == "all":
+        print("Not yet implemented")
+
+
+if __name__ == "__main__":
+    main()
