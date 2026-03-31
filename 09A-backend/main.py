@@ -21,7 +21,7 @@ with open("testdata/test-data.csv", "r", newline="") as file:
     print(str(datetime.datetime.now()) + "\n" + "total amount: "  + str(i))
 
 
-
+databaseAdapter.query("SELECT * FROM OperationTypeOverview;")
 
 
 
