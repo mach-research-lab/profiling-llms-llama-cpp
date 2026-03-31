@@ -1,5 +1,6 @@
 import psycopg
-
+from psycopg.rows import dict_row
+import json
 
 class DatabaseAdapter:
     """
@@ -107,9 +108,10 @@ Woking
         with psycopg.connect(self.dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(query)
-                for row in cur:
-                    print(row)
+                rows = cur.fetchall
 
+        json_data = json.dumps(rows)
+        return(json_data)
 
 
 

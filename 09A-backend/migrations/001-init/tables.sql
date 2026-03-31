@@ -1,7 +1,5 @@
 
 
-
-
 CREATE TABLE event_item(
     event_item_id INT PRIMARY KEY,
     event_item_timestamp TIMESTAMP,
