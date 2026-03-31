@@ -12,4 +12,12 @@ CREATE TABLE event_item(
     event_n_elements INT NOT NUll
 );
 
+CREATE TABLE papi_item(
+    event_item_id INT FOREIGN KEY
+
+
+
+
+)
+
 
