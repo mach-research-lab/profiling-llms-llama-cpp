@@ -108,7 +108,7 @@ Woking
         with psycopg.connect(self.dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(query)
-                rows = cur.fetchall
+                rows = cur.fetchall()
 
         json_data = json.dumps(rows)
         return(json_data)
