@@ -110,7 +110,7 @@ Woking
                 cur.execute(query)
                 rows = cur.fetchall()
 
-        json_data = json.dumps(rows)
+        json_data = json.dumps(rows, default=str)
         return(json_data)
 
 
