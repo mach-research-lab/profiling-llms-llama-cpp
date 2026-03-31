@@ -11,6 +11,8 @@
 #include <cstring>
 #include <time.h>
 #include <papi.h>
+#include <libpq-fe.h>
+#include <sstream>
 
 #define MAX_PAPI_EVENTS 4
 
@@ -24,13 +26,31 @@ static inline int64_t now_ns() {
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
+struct event_record {
+    int event_item_id;
+    int64_t run_id;
+    std::string phase;
+    int token_index;
+    std::string tensor_name;
+    std::string op_name;
+    int64_t duration_us;
+    size_t tensor_size;
+    int64_t n_elements;
+    std::vector<long long> papi_values;
+};
+
 struct callback_data {
-    int64_t      t_start;
-    FILE       * out_file;
-    int          papi_event_set;
-    int          token_index;
-    const char * phase;
-    int          n_events;
+    int64_t                       t_start;
+    FILE                        * out_file;
+    int                           papi_event_set;
+    int                           token_index;
+    const char                  * phase;
+    int                           n_events;
+    PGconn                      * db_conn;
+    std::vector<std::string>    * event_names;
+    int                           event_item_id_counter;
+    std::vector<event_record>   * pending_records;
+    int64_t                       run_id;
 };
 
 static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
@@ -45,9 +65,9 @@ static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
     if (t->name[0] == '\0') return true;
 
     int papi_values_length = MAX_PAPI_EVENTS;
-    
+
     if(unrestricted_events_supported) {
-        papi_values_length = data->n_events; // Example value, adjust as needed
+        papi_values_length = data->n_events;
     }
 
     std::vector<long long> papi_values(papi_values_length, 0);
@@ -58,6 +78,7 @@ static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
     int64_t      n_elements  = ggml_nelements(t);
     const char * op_name     = ggml_op_name(t->op);
 
+    // Write to CSV file
     fprintf(data->out_file, "%s,%d,%s,%s,%ld,%zu,%ld",
         data->phase,
         data->token_index,
@@ -72,7 +93,88 @@ static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
     }
     fprintf(data->out_file, "\n");
 
+    // Accumulate record for later batch insertion into PostgreSQL
+    if (data->db_conn != nullptr && PQstatus(data->db_conn) == CONNECTION_OK && data->pending_records != nullptr) {
+        event_record record;
+        record.event_item_id = data->event_item_id_counter++;
+        record.run_id = data->run_id;
+        record.phase = data->phase;
+        record.token_index = data->token_index;
+        record.tensor_name = t->name;
+        record.op_name = op_name;
+        record.duration_us = duration_ns / 1000;  // Convert to microseconds
+        record.tensor_size = tensor_size;
+        record.n_elements = n_elements;
+        record.papi_values = papi_values;
+
+        data->pending_records->push_back(record);
+    }
+
     return true;
+}
+
+static void batch_insert_to_database(PGconn* db_conn, const std::vector<event_record>& records, const std::vector<std::string>& event_names) {
+    if (db_conn == nullptr || PQstatus(db_conn) != CONNECTION_OK || records.empty()) {
+        return;
+    }
+
+    printf("Inserting %zu records into database...\n", records.size());
+
+    // Begin transaction
+    PGresult *res = PQexec(db_conn, "BEGIN");
+    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+        fprintf(stderr, "BEGIN transaction failed: %s\n", PQerrorMessage(db_conn));
+        PQclear(res);
+        return;
+    }
+    PQclear(res);
+
+    // Insert all event_item records
+    for (const auto& record : records) {
+        std::ostringstream query;
+        query << "INSERT INTO event_item (event_item_id, run_id, event_item_timestamp, event_phase, "
+              << "event_token_index, event_tensor_name, event_operation_type, "
+              << "event_time_microseconds, event_size_bytes, event_n_elements) VALUES ("
+              << record.event_item_id << ", " << record.run_id << ", NOW(), '" << record.phase << "', "
+              << record.token_index << ", '" << record.tensor_name << "', '" << record.op_name << "', "
+              << record.duration_us << ", " << record.tensor_size << ", " << record.n_elements << ");";
+
+        res = PQexec(db_conn, query.str().c_str());
+        if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+            fprintf(stderr, "INSERT into event_item failed: %s\n", PQerrorMessage(db_conn));
+            PQclear(res);
+            PQexec(db_conn, "ROLLBACK");
+            return;
+        }
+        PQclear(res);
+
+        // Insert PAPI counter data
+        for (size_t i = 0; i < event_names.size() && i < record.papi_values.size(); i++) {
+            std::ostringstream papi_query;
+            papi_query << "INSERT INTO event_papi_counter (event_item_id, papi_event_name, papi_value) VALUES ("
+                       << record.event_item_id << ", '" << event_names[i] << "', "
+                       << record.papi_values[i] << ");";
+
+            res = PQexec(db_conn, papi_query.str().c_str());
+            if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+                fprintf(stderr, "INSERT into event_papi_counter failed: %s\n", PQerrorMessage(db_conn));
+                PQclear(res);
+                PQexec(db_conn, "ROLLBACK");
+                return;
+            }
+            PQclear(res);
+        }
+    }
+
+    // Commit transaction
+    res = PQexec(db_conn, "COMMIT");
+    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+        fprintf(stderr, "COMMIT failed: %s\n", PQerrorMessage(db_conn));
+        PQexec(db_conn, "ROLLBACK");
+    } else {
+        printf("Successfully inserted %zu records into database.\n", records.size());
+    }
+    PQclear(res);
 }
 
 // Parse --papi-events from argv before passing the rest to llama's parser.
@@ -151,12 +253,36 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    // --- PostgreSQL init ---
+    const char *db_conninfo = "host=localhost port=5434 dbname=toolDB user=user password=pass";
+    PGconn *db_conn = PQconnectdb(db_conninfo);
+
+    if (PQstatus(db_conn) != CONNECTION_OK) {
+        fprintf(stderr, "Warning: Connection to database failed: %s\n", PQerrorMessage(db_conn));
+        fprintf(stderr, "Continuing without database insertion (CSV only).\n");
+        PQfinish(db_conn);
+        db_conn = nullptr;
+    } else {
+        printf("Successfully connected to PostgreSQL database.\n");
+    }
+
+    // Generate unique run_id based on current timestamp in milliseconds
+    int64_t run_id = now_ns() / 1000000;  // Convert nanoseconds to milliseconds
+    printf("Run ID: %ld\n", run_id);
+
+    std::vector<event_record> pending_records;
+
     callback_data cb_data;
-    cb_data.papi_event_set = PAPI_NULL;
-    cb_data.out_file       = nullptr;
-    cb_data.token_index    = 0;
-    cb_data.phase          = "prefill";
-    cb_data.n_events       = (int)event_names.size();
+    cb_data.papi_event_set       = PAPI_NULL;
+    cb_data.out_file             = nullptr;
+    cb_data.token_index          = 0;
+    cb_data.phase                = "prefill";
+    cb_data.n_events             = (int)event_names.size();
+    cb_data.db_conn              = db_conn;
+    cb_data.event_names          = &event_names;
+    cb_data.event_item_id_counter = 1;
+    cb_data.pending_records      = &pending_records;
+    cb_data.run_id               = run_id;
 
     if (PAPI_create_eventset(&cb_data.papi_event_set) != PAPI_OK) {
         fprintf(stderr, "PAPI create eventset error!\n");
@@ -287,8 +413,23 @@ int main(int argc, char ** argv) {
     fclose(cb_data.out_file);
     PAPI_destroy_eventset(&cb_data.papi_event_set);
     PAPI_shutdown();
+
+    // Batch insert all accumulated records into database
+    if (db_conn != nullptr) {
+        batch_insert_to_database(db_conn, pending_records, event_names);
+    }
+
+    // Clean up database connection
+    if (db_conn != nullptr) {
+        PQfinish(db_conn);
+        printf("Database connection closed.\n");
+    }
+
     llama_backend_free();
 
     printf("Measurements saved to %s\n", result_path.c_str());
+    if (db_conn != nullptr) {
+        printf("Data also inserted into PostgreSQL database.\n");
+    }
     return 0;
 }
