@@ -235,9 +235,27 @@ static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
     return true;
 }
 
+static std::string extract_result_path(int & argc, char ** argv) {
+    std::string result_path = "energy.csv";
+    for (int i = 1; i < argc - 1; i++) {
+        if (std::strcmp(argv[i], "--result-path") == 0) {
+            result_path = argv[i + 1];
+            // Remove these two args from argv
+            for (int j = i + 2; j < argc; j++) {
+                argv[j - 2] = argv[j];
+            }
+            argc -= 2;
+            break;
+        }
+    }
+    return result_path;
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 int main(int argc, char ** argv) {
+
+    std::string result_path = extract_result_path(argc, argv);
 
     common_params params;
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
@@ -268,9 +286,9 @@ int main(int argc, char ** argv) {
     printf("═══════════════════════════════════════════════════════\n\n");
 
     // Open CSV
-    cb_data.out_file = fopen("energy.csv", "w");
+    cb_data.out_file = fopen(result_path.c_str(), "w");
     if (!cb_data.out_file) {
-        fprintf(stderr, "Failed to open energy.csv\n");
+        fprintf(stderr, "Failed to open %s\n", result_path.c_str());
         return 1;
     }
 

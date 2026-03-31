@@ -111,6 +111,7 @@ def check_binary():
 def run_binary(model_path, prompt, n_predict, cache_type):
     cmd = [
         BINARY,
+        "--result-path", os.path.join(LLAMA_ROOT, "kv_sizes.csv"),
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),

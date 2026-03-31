@@ -11,7 +11,10 @@ import subprocess
 import sys
 import os
 import glob
-from event_retriever import get_available_events
+import shutil
+
+# Homemade module
+from event_retriever import get_available_events, get_valid_runs
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 LLAMA_ROOT  = os.path.dirname(SCRIPT_DIR)
@@ -110,7 +113,6 @@ def detect_cache_type(model_path: str) -> str:
     return "f16"  # default
 
 
-
 #--------- Common functions ---------
 def find_models():
     pattern = os.path.join(MODELS_ROOT, "**", "*.gguf")
@@ -162,6 +164,7 @@ def run_single_papi(model_path, events, prompt, n_predict, binary_path):
     cmd = [
         binary_path,
         "--papi-events", events_arg,
+        "--result-path", "measurements.csv",
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),
@@ -176,6 +179,7 @@ def run_single_papi(model_path, events, prompt, n_predict, binary_path):
 def run_kv_measurement(model_path, prompt, n_predict, cache_type, binary_path):
     cmd = [
         binary_path,
+        "--result-path", "kv_sizes.csv",
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),
@@ -202,6 +206,7 @@ def run_kv_measurement(model_path, prompt, n_predict, cache_type, binary_path):
 def run_energy(model_path, prompt, n_predict, binary_path):
     cmd = [
         binary_path,
+        "--result-path", "energy.csv",
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),
@@ -221,6 +226,110 @@ def run_energy(model_path, prompt, n_predict, binary_path):
         print(f"\n  ✓ Results saved to: {csv_path}")
     else:
         print("\n  ✗ energy.csv not found after run.")
+
+# --------- RUN ALL (Multi-batch with event groups) ---------
+def run_all(model_path, prompt, n_predict, cache_type):
+    # Remove existing directory and recreate it fresh
+    output_dir = os.path.join(LLAMA_ROOT, "run_all_results")
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+    os.makedirs(output_dir)
+
+    # ---- Running PAPI events in groups -----
+
+    binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
+    #Get event groups for multibatch runs
+    event_groups = get_valid_runs()
+    for group in event_groups:
+        print(f"\nEvent group: {group}")
+    print(f"\nRunning {len(event_groups)} event groups for multi-batch measurement...")
+    for i, group in enumerate(event_groups):
+        events_arg = ",".join(group)
+        csv_path = os.path.join(output_dir, f"events_group_{i+1}.csv")
+
+        cmd = [
+            binary_path,
+            "--papi-events", events_arg,
+            "--result-path", csv_path,
+            "--papi-events-unrestricted",  # allow all events for multibatch runs
+            "-m", model_path,
+            "-p", prompt,
+            "-n", str(n_predict),
+            "--temp", "0",  # fixed temp for consistent measurements
+            "--log-disable",
+        ]
+
+        print(f"\nRunning group {i+1}/{len(event_groups)}: {' '.join(cmd)}\n")
+        result = subprocess.run(cmd, cwd=LLAMA_ROOT)
+
+        if result.returncode != 0:
+            print(f"\n  ✗ Group {i+1} failed (returncode {result.returncode})")
+            sys.exit(1)
+
+        if os.path.isfile(csv_path):
+            print(f"\n  ✓ Group {i+1} results saved to: {csv_path}")
+        else:
+            print(f"\n  ✗ {csv_path} not found after run.")
+    
+    # ---- Running energy -----
+
+    binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-energy")
+    csv_path = os.path.join(output_dir, f"energy.csv")
+
+    cmd = [
+        binary_path,
+        "--result-path", csv_path,
+        "-m", model_path,
+        "-p", prompt,
+        "-n", str(n_predict),
+        "--temp", "0",  # fixed temp for consistent measurements
+        "--log-disable",
+    ]
+
+    print(f"\nRunning: {' '.join(cmd)}\n")
+    result_energy = subprocess.run(cmd, cwd=LLAMA_ROOT)
+
+    if result_energy.returncode != 0:
+        print(f"\n  ✗ llama-energy failed (returncode {result_energy.returncode})")
+        sys.exit(1)
+    
+    
+    if os.path.isfile(csv_path):
+        print(f"\n  ✓ Results saved to: {csv_path}")
+    else:
+        print(f"\n  ✗ energy.csv not found after run.")
+
+    # ---- Running KV cache footprint -----
+
+    binary_path = os.path.join(LLAMA_ROOT, "build/bin/kv-measure")
+    csv_path = os.path.join(output_dir, f"kv_measurement.csv")
+    cmd = [
+        binary_path,
+        "--result-path", csv_path,
+        "-m", model_path,
+        "-p", prompt,
+        "-n", str(n_predict),
+        "--cache-type-k", cache_type,
+        "--cache-type-v", cache_type,
+        "--temp", "0",  # fixed temp for consistent measurements
+        "--log-disable",
+    ]
+
+    print(f"\nRunning: {' '.join(cmd)}\n")
+    result_kv = subprocess.run(cmd, cwd=LLAMA_ROOT)
+
+    if result_kv.returncode != 0:
+        print(f"\n  ✗ kv-measure failed (returncode {result_kv.returncode})")
+        sys.exit(1)
+    
+    
+    if os.path.isfile(csv_path):
+        print(f"\n  ✓ Results saved to: {csv_path}")
+    else:
+        print(f"\n  ✗ kv_measurement.csv not found after run.")
+
+
+
 
 
 def main():
@@ -257,7 +366,7 @@ def main():
 
     #If KV cache measurement, detect cache type from model name. Otherwise skip to prompt input.
     cache_type = None
-    if run_type == "kv":
+    if run_type == "kv" or run_type == "all":
         cache_type = detect_cache_type(model_path)
         print(f"\nDetected KV cache type: {cache_type}")
 
@@ -278,7 +387,7 @@ def main():
     elif run_type == "energy":
         run_energy(model_path, prompt, n_predict, binary_path)
     elif run_type == "all":
-        print("Not yet implemented")
+        run_all(model_path, prompt, n_predict, cache_type)
 
 
 if __name__ == "__main__":

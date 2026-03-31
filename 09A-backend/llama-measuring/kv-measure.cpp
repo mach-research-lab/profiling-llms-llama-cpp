@@ -9,8 +9,24 @@
 #include <string>
 #include <vector>
 
-int main(int argc, char ** argv) {
+static std::string extract_result_path(int & argc, char ** argv) {
+    std::string result_path = "energy.csv";
+    for (int i = 1; i < argc - 1; i++) {
+        if (std::strcmp(argv[i], "--result-path") == 0) {
+            result_path = argv[i + 1];
+            // Remove these two args from argv
+            for (int j = i + 2; j < argc; j++) {
+                argv[j - 2] = argv[j];
+            }
+            argc -= 2;
+            break;
+        }
+    }
+    return result_path;
+}
 
+int main(int argc, char ** argv) {
+    std::string result_path = extract_result_path(argc, argv);
     common_params params;
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
         return 1;
@@ -58,9 +74,9 @@ int main(int argc, char ** argv) {
     }
 
     // Open CSV output file
-    FILE * csv = fopen("kv_sizes.csv", "w");
+    FILE * csv = fopen(result_path.c_str(), "w");
     if (!csv) {
-        fprintf(stderr, "Failed to open kv_sizes.csv\n");
+        fprintf(stderr, "Failed to open %s\n", result_path.c_str());
         return 1;
     }
     fprintf(csv, "phase,token_index,tokens_in_cache,bytes,kb\n");

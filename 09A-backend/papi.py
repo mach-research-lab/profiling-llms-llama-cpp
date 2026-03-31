@@ -117,6 +117,7 @@ def run_binary(model_path, events, prompt, n_predict):
     cmd = [
         BINARY,
         "--papi-events", events_arg,
+        "--result-path", "measurements.csv",
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),

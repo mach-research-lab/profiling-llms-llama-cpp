@@ -14,6 +14,10 @@
 
 #define MAX_PAPI_EVENTS 4
 
+// Used for multibatched runs to keep down amount of runs needed
+bool unrestricted_events_supported = false;
+
+
 static inline int64_t now_ns() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -40,8 +44,14 @@ static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
 
     if (t->name[0] == '\0') return true;
 
-    long long papi_values[MAX_PAPI_EVENTS] = {0};
-    PAPI_stop(data->papi_event_set, papi_values);
+    int papi_values_length = MAX_PAPI_EVENTS;
+    
+    if(unrestricted_events_supported) {
+        papi_values_length = data->n_events; // Example value, adjust as needed
+    }
+
+    std::vector<long long> papi_values(papi_values_length, 0);
+    PAPI_stop(data->papi_event_set, papi_values.data());
 
     int64_t      duration_ns = now_ns() - data->t_start;
     size_t       tensor_size = ggml_nbytes(t);
@@ -67,7 +77,7 @@ static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
 
 // Parse --papi-events from argv before passing the rest to llama's parser.
 // Removes our custom flag so llama's parser doesn't choke on it.
-static std::vector<std::string> extract_papi_args(int & argc, char ** argv) {
+static std::vector<std::string> extract_papi_args(int & argc, char ** argv, std::string & result_path) {
     std::vector<std::string> events;
     int write_idx = 1; // argv[0] stays
 
@@ -83,13 +93,21 @@ static std::vector<std::string> extract_papi_args(int & argc, char ** argv) {
                 start = end + 1;
             }
             i++; // skip the value
+        } else if (std::strcmp(argv[i], "--result-path") == 0 && i + 1 < argc) {
+            result_path = argv[i + 1];
+            i++; // skip the value
+        } else if (std::strcmp(argv[i], "--papi-events-unrestricted") == 0) {
+            unrestricted_events_supported = true;
         } else {
-            argv[write_idx++] = argv[i];
+            argv[write_idx++] = argv[i]; // only forward unrecognized args
         }
+        
     }
     argc = write_idx;
     return events;
 }
+
+
 
 static void write_zero_counters(FILE * f, int n_events) {
     for (int i = 0; i < n_events; i++) {
@@ -101,7 +119,8 @@ static void write_zero_counters(FILE * f, int n_events) {
 int main(int argc, char ** argv) {
 
     // --- Extract our custom flag before llama arg parsing ---
-    std::vector<std::string> event_names = extract_papi_args(argc, argv);
+    std::string result_path = "measurements.csv";
+    std::vector<std::string> event_names = extract_papi_args(argc, argv, result_path);
 
     if (event_names.empty()) {
         fprintf(stderr, "Error: no PAPI events specified.\n");
@@ -109,7 +128,7 @@ int main(int argc, char ** argv) {
             argv[0]);
         return 1;
     }
-    if (event_names.size() > MAX_PAPI_EVENTS) {
+    if (event_names.size() > MAX_PAPI_EVENTS && !unrestricted_events_supported) {
         fprintf(stderr, "Error: maximum %d PAPI events supported, got %zu.\n",
             MAX_PAPI_EVENTS, event_names.size());
         return 1;
@@ -160,9 +179,9 @@ int main(int argc, char ** argv) {
     }
 
     // --- Open CSV and write dynamic header ---
-    cb_data.out_file = fopen("measurements.csv", "w");
+    cb_data.out_file = fopen(result_path.c_str(), "w");
     if (!cb_data.out_file) {
-        fprintf(stderr, "Failed to open measurements.csv!\n");
+        fprintf(stderr, "Failed to open %s!\n", result_path.c_str());
         return 1;
     }
 
@@ -270,6 +289,6 @@ int main(int argc, char ** argv) {
     PAPI_shutdown();
     llama_backend_free();
 
-    printf("Measurements saved to measurements.csv\n");
+    printf("Measurements saved to %s\n", result_path.c_str());
     return 0;
 }

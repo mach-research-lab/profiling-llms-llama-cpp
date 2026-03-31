@@ -103,6 +103,7 @@ def select_model():
 def run_binary(model_path, prompt, n_predict):
     cmd = [
         BINARY,
+        "--result-path", os.path.join(LLAMA_ROOT, "energy.csv"),
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),
