@@ -188,9 +188,6 @@ def build_valid_runs():
 def get_valid_runs():
     return build_valid_runs()
 
-for run in get_valid_runs():
-    print(run)
-
 
 
 

@@ -47,7 +47,7 @@ static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
     int papi_values_length = MAX_PAPI_EVENTS;
     
     if(unrestricted_events_supported) {
-        papi_values_length = 10; // Example value, adjust as needed
+        papi_values_length = data->n_events; // Example value, adjust as needed
     }
 
     std::vector<long long> papi_values(papi_values_length, 0);

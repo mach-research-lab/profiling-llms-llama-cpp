@@ -2,6 +2,7 @@
 #Ignore all CSV files
 *.csv
 
+run_all_results*/
 #Ignore build artifacts
 build*/
 
