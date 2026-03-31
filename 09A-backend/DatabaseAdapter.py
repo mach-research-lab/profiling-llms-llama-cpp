@@ -107,7 +107,8 @@ Woking
         with psycopg.connect(self.dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(query)
-                print("xxx: ", cur.fetchall)
+                for row in cur:
+                    print(row)
 
 
 
