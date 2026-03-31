@@ -104,11 +104,20 @@ Woking
 
     def query(self, query):
 
-        return 0
+        with psycopg.connect(self.dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                print(cur.fetchone)
+
+
+
+
+
 
     def insert_n_events(self, eventGroup: list[list[str]]) -> None:
         """
-        Inserts arbitrary amount of events directly to the DB, should be avoided if possible
+        Inserts arbitrary amount of events directly to the DB,
+        should be avoided if possible
 
         :param eventGroup:
         :return:
