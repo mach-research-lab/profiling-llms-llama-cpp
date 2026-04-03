@@ -266,8 +266,15 @@ int main(int argc, char ** argv) {
         printf("Successfully connected to PostgreSQL database.\n");
     }
 
-    // Generate unique run_id based on current timestamp in milliseconds
-    int64_t run_id = now_ns() / 1000000;  // Convert nanoseconds to milliseconds
+    // Generate unique run_id by incrementing from the max existing run_id in database
+    int64_t run_id = 1;  // Default if database is empty or unavailable
+    if (db_conn != nullptr) {
+        PGresult *res = PQexec(db_conn, "SELECT COALESCE(MAX(run_id), 0) + 1 FROM event_item");
+        if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0) {
+            run_id = atoll(PQgetvalue(res, 0, 0));
+        }
+        PQclear(res);
+    }
     printf("Run ID: %ld\n", run_id);
 
     std::vector<event_record> pending_records;
