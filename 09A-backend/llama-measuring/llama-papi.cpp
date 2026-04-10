@@ -355,6 +355,11 @@ int main(int argc, char ** argv) {
     bool continue_conversation = true;
     int turn_number = 0;
 
+    std::vector<llama_chat_message> messages;
+    std::vector<char> formatted(n_ctx);
+    int prev_len = 0;
+    const char * tmpl = llama_model_chat_template(model, nullptr);
+    
     while (continue_conversation) {
         turn_number++;
         printf("\n--- Turn %d ---\n", turn_number);
@@ -374,10 +379,18 @@ int main(int argc, char ** argv) {
             }
         }
 
+        messages.push_back({"user", strdup(current_prompt.c_str())});
+        int new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+        if (new_len > (int)formatted.size()) {
+        formatted.resize(new_len);
+        new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+        }
+        std::string prompt_delta(formatted.begin() + prev_len, formatted.begin() + new_len);
+
         // PHASE 1: Tokenization
         int64_t t_tok_start = now_ns();
-        const bool add_bos  = (turn_number == 1) && llama_vocab_get_add_bos(vocab);
-        std::vector<llama_token> new_tokens = common_tokenize(ctx, current_prompt, add_bos);
+        const bool add_bos  = llama_vocab_get_add_bos(vocab);
+        std::vector<llama_token> new_tokens = common_tokenize(ctx, prompt_delta, add_bos, true);
         int64_t t_tok_end   = now_ns();
 
         if (new_tokens.empty()) {
@@ -410,7 +423,7 @@ int main(int argc, char ** argv) {
         }
 
         // PHASE 2: Prefill/Decode user input
-        cb_data.phase       = (turn_number == 1) ? "prefill" : "decode";
+        cb_data.phase       = "prefill";
         cb_data.token_index = turn_number;
 
         if (llama_decode(ctx, llama_batch_get_one(new_tokens.data(), (int)new_tokens.size()))) {
@@ -440,13 +453,16 @@ int main(int argc, char ** argv) {
             write_zero_counters(cb_data.out_file, cb_data.n_events);
 
             std::string piece = common_token_to_piece(ctx, new_token);
+
+            if (llama_vocab_is_eog(vocab, new_token)) break; //Check if end of generation token
+
             printf("%s", piece.c_str());
             fflush(stdout);
 
             response_tokens.push_back(new_token);
             conversation_tokens.push_back(new_token);
 
-            if (llama_vocab_is_eog(vocab, new_token)) break;
+            
             if (n_pos >= n_ctx - 1) {
                 printf("\n[Context limit reached]");
                 break;
@@ -464,6 +480,18 @@ int main(int argc, char ** argv) {
         }
 
         printf("\n");
+
+        std::string response_text;
+        for (auto & tok : response_tokens) {
+            response_text += common_token_to_piece(ctx, tok);
+        }
+        // Update message history with assistant response
+        messages.push_back({"assistant", strdup(response_text.c_str())});
+        prev_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), false, nullptr, 0);
+        if (prev_len < 0) {
+            fprintf(stderr, "Failed to apply chat template\n");
+            prev_len = 0;
+        }
 
         // Check if we should continue the conversation
         if (!conversation_mode) {
