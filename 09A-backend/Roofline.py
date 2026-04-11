@@ -108,14 +108,14 @@ def get_cpu_info():
 
 def compute_peak_flops(cpu):
     """Peak FLOPS in GFLOPS using average frequency."""
-    # ×2 for FMA (multiply-add counts as 2 FLOPS)
-    peak = cpu["cores"] * cpu["avg_ghz"] * cpu["flops_per_cycle"] * 2
+    # No FMA factor — conservative theoretical peak
+    peak = cpu["cores"] * cpu["avg_ghz"] * cpu["flops_per_cycle"]
     print(f"\n── Problem 1: Hardware Ceiling ──────────────────")
     print(f"  CPU cores (physical): {cpu['cores']}")
     print(f"  Frequency min/max:    {cpu['min_ghz']:.2f} / {cpu['max_ghz']:.2f} GHz")
     print(f"  Frequency (bas+boost)/2: {cpu['avg_ghz']:.2f} GHz  (bas={cpu['base_ghz']:.2f}, boost={cpu['max_ghz']:.2f})")
     print(f"  ISA:                  {cpu['isa']} → {cpu['flops_per_cycle']} FP32/cycle")
-    print(f"  Peak FLOPS:           {peak:.1f} GFLOPS  (with FMA ×2)")
+    print(f"  Peak FLOPS:           {peak:.1f} GFLOPS  (no FMA, conservative)")
     return peak  # GFLOPS
 
 
