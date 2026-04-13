@@ -228,6 +228,8 @@ int main(int argc, char ** argv) {
             MAX_PAPI_EVENTS, event_names.size());
         return 1;
     }
+    std::vector<long long> papi_values(n_events, 0);
+
 
     if (PAPI_create_eventset(&papi_event_set) != PAPI_OK) {
         fprintf(stderr, "PAPI create eventset error!\n");
@@ -255,16 +257,6 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "Failed to open %s!\n", result_path.c_str());
         return 1;
     }
-
-    //Displaying measurement results in top-view format
-    fprintf(out_file, "TOP_VIEW,runtime_ns,runtime_ms,runtime_s,Peak_RSS_MB,AVG_CPU_usage");
-    //Loop adds selected PAPI events to the header
-    for (const auto & name : event_names) {
-        std::string lower = name;
-        for (auto & c : lower) c = std::tolower(c);
-        fprintf(out_file, ",%s", lower.c_str());
-    }
-    fprintf(out_file, "\n");
 
     // --- Standard llama arg parsing and initialization ---
     common_params params;
@@ -302,9 +294,13 @@ int main(int argc, char ** argv) {
     int prev_len = 0;
     const char * tmpl = llama_model_chat_template(model, nullptr);
     
+
     ///////// START OF TOP-LEVEL MEASUREMENTS ///////
+    int64_t model_size = llama_model_size(model);
+    double model_size_mb = (double)model_size / (1024.0 * 1024.0);
     int64_t start_time = now_ns();
     int64_t start_cpu_time = get_cpu_time_ns();
+    int32_t generated_tokens = 0;
     PAPI_start(papi_event_set);
     /////////////////////////////////////////////////
 
@@ -405,6 +401,7 @@ int main(int argc, char ** argv) {
             fflush(stdout);
 
             response_tokens.push_back(new_token);
+            generated_tokens++;
             conversation_tokens.push_back(new_token);
 
             if (n_pos >= n_ctx - 1) {
@@ -442,24 +439,64 @@ int main(int argc, char ** argv) {
     }
 
     ////// STOP TOP-LEVEL MEASUREMENTS ///////////
-
-    std::vector<long long> papi_values(MAX_PAPI_EVENTS, 0);
     PAPI_stop(papi_event_set, papi_values.data());
     int64_t end_time = now_ns();
     int64_t end_cpu_time = get_cpu_time_ns();
     int64_t end_rss_kb = get_peak_rss_kb();
 
+    //RUNTIME
     int64_t runtime_ns = end_time - start_time;
     double runtime_s = (double)runtime_ns / 1e9;
-    double runtime_ms = (double)runtime_ns / 1e6;
+
+    //CPU USAGE
     int64_t cpu_time_ns = end_cpu_time - start_cpu_time;
     double avg_cpu_usage = ((double)(cpu_time_ns * 100) / (double)runtime_ns) / (double)sysconf(_SC_NPROCESSORS_ONLN); // Adjust for number of CPU cores
+    
+    //PEAK RSS
     double rss_mb = (double)end_rss_kb / 1024.0; // Convert KB to MB
+
+    //TOKENS
+    double token_throughput = (double)generated_tokens / runtime_s;
+    int32_t total_tokens = (int32_t)conversation_tokens.size();
+
+    //KV-CACHE
+    int32_t kv_tokens_used = (int32_t)conversation_tokens.size();
+    int32_t kv_tokens_capacity = n_ctx;
+
+    int32_t n_layers = llama_model_n_layer(model);
+    int32_t n_embd   = llama_model_n_embd(model);
+    int64_t kv_size_used = (int64_t)kv_tokens_used * n_layers * n_embd * sizeof(params.cache_type_k); // Assuming K and V have the same type and size, this is a simplification. For more accuracy, you could calculate K and V sizes separately based on their types.
+    int64_t kv_size_capacity = (int64_t)kv_tokens_capacity * n_layers * n_embd * sizeof(params.cache_type_k);
+
+    if(params.cache_type_k != params.cache_type_v) {
+        printf("Warning: cache_type_k and cache_type_v are different, but kv_size calculations assume they are the same. Results may be inaccurate.\n");
+    }
 
     //////////////////////////////////////////////
 
     printf("\n--- Conversation ended ---\n");
 
+    // Write results to CSV in top-view format
+    fprintf(out_file, "TOP_VIEW\n");
+    fprintf(out_file, "model_size: %ld bytes\n", model_size);
+    fprintf(out_file, "model_size_mb: %.2f MB\n", model_size_mb);
+    fprintf(out_file, "runtime_ns: %ld ns\n", runtime_ns);
+    fprintf(out_file, "runtime_s: %.2f s\n", runtime_s);
+    fprintf(out_file, "Peak_RSS_MB: %.2f MB\n", rss_mb);
+    fprintf(out_file, "AVG_CPU_usage: %.2f%%\n", avg_cpu_usage);
+    fprintf(out_file, "generated_tokens: %d\n", generated_tokens);
+    fprintf(out_file, "total_tokens: %d\n", total_tokens);
+    fprintf(out_file, "token_throughput: %.2f tokens/s\n", token_throughput);
+    fprintf(out_file, "kv_tokens_used: %d\n", kv_tokens_used);
+    fprintf(out_file, "kv_tokens_capacity: %d\n", kv_tokens_capacity);
+    fprintf(out_file, "kv_size_used_bytes: %ld bytes\n", kv_size_used);
+    fprintf(out_file, "kv_size_capacity_bytes: %ld bytes\n", kv_size_capacity);
+    // Loop adds selected PAPI events to the output
+     for (size_t i = 0; i < event_names.size(); i++) {
+        fprintf(out_file, "%s: %lld\n", event_names[i].c_str(), papi_values[i]);
+    }
+
+   
     // Clean up
     common_sampler_free(smpl);
     fclose(out_file);
@@ -472,10 +509,6 @@ int main(int argc, char ** argv) {
         batch_insert_to_database(db_conn, pending_records, event_names);
     }
 
-    // Write results to CSV in top-view format
-    fprintf(out_file, "--------,%ld, %.2f, %.2f, %.2f, %.2f", runtime_ns, runtime_ms, runtime_s, rss_mb, avg_cpu_usage);
-    for (int i = 0; i < n_events; i++) fprintf(out_file, ",%lld", papi_values[i]);
-    fprintf(out_file, "\n");
 
     // Clean up database connection
     if (db_conn != nullptr) {

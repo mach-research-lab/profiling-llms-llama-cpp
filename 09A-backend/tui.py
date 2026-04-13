@@ -202,7 +202,7 @@ def run_conversation_papi(model_path, events, prompt, n_predict, binary_path):
     subprocess.run(cmd, cwd=LLAMA_ROOT)
 
 #Used for running llama-papi in TOP-VIEW mode (experimental)
-def run_top_view_papi(model_path, events, prompt, n_predict, binary_path):
+def run_top_view_papi(model_path, events, prompt, n_predict, cache_type, binary_path):
     event_names = [e[0] for e in events]
     events_arg = ",".join(event_names)
 
@@ -214,6 +214,8 @@ def run_top_view_papi(model_path, events, prompt, n_predict, binary_path):
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),
+        "--cache-type-k", cache_type,
+        "--cache-type-v", cache_type,
         "--temp", "0",  # fixed temp for consistent measurements
         "--log-disable",
     ]
@@ -422,7 +424,7 @@ def main():
 
     #If KV cache measurement, detect cache type from model name. Otherwise skip to prompt input.
     cache_type = None
-    if run_type == "kv" or run_type == "all":
+    if run_type == "kv" or run_type == "all" or run_type == "TOP-VIEW":
         cache_type = detect_cache_type(model_path)
         print(f"\nDetected KV cache type: {cache_type}")
 
@@ -447,7 +449,7 @@ def main():
     elif run_type == "conversation":
         run_conversation_papi(model_path, events, prompt, n_predict, binary_path)
     elif run_type == "TOP-VIEW":
-        run_top_view_papi(model_path, events, prompt, n_predict, binary_path)
+        run_top_view_papi(model_path, events, prompt, n_predict, cache_type, binary_path)
 
 
 if __name__ == "__main__":
