@@ -30,6 +30,7 @@ def select_run_type():
         "3": ("kv",     "KV cache footprint"),
         "4": ("all",    "Run all (Multi-batch with event groups)"),
         "5": ("conversation", "Conversation mode with PAPI events"),
+        "6": ("TOP-VIEW", "Run TOP-VIEW measurements with PAPI events (experimental)"),
     }
 
     print("\nSelect run type:")
@@ -39,7 +40,7 @@ def select_run_type():
     while True:
         raw = input("> ").strip()
         if raw not in run_types:
-            print("Invalid choice. Enter 1, 2, 3, 4, or 5.")
+            print("Invalid choice. Enter 1, 2, 3, 4, 5, or 6.")
             continue
 
         key, desc = run_types[raw]
@@ -200,6 +201,30 @@ def run_conversation_papi(model_path, events, prompt, n_predict, binary_path):
     # Run interactively so user can input multiple turns
     subprocess.run(cmd, cwd=LLAMA_ROOT)
 
+#Used for running llama-papi in TOP-VIEW mode (experimental)
+def run_top_view_papi(model_path, events, prompt, n_predict, binary_path):
+    event_names = [e[0] for e in events]
+    events_arg = ",".join(event_names)
+
+    cmd = [
+        binary_path,
+        "--papi-events", events_arg,
+        "--result-path", "top_view_measurements.csv",
+        "--conversation",  # Enable conversation mode for TOP-VIEW
+        "-m", model_path,
+        "-p", prompt,
+        "-n", str(n_predict),
+        "--temp", "0",  # fixed temp for consistent measurements
+        "--log-disable",
+    ]
+
+    print(f"\nStarting TOP-VIEW measurement with PAPI events...")
+    print(f"Running: {' '.join(cmd)}\n")
+    print("You can type 'quit' or 'exit' to end the conversation.\n")
+
+    # Run interactively so user can input multiple turns
+    subprocess.run(cmd, cwd=LLAMA_ROOT)
+
 #Used for running kv-measure
 def run_kv_measurement(model_path, prompt, n_predict, cache_type, binary_path):
     cmd = [
@@ -251,6 +276,8 @@ def run_energy(model_path, prompt, n_predict, binary_path):
         print(f"\n  ✓ Results saved to: {csv_path}")
     else:
         print("\n  ✗ energy.csv not found after run.")
+
+
 
 # --------- RUN ALL (Multi-batch with event groups) ---------
 def run_all(model_path, prompt, n_predict, cache_type):
@@ -377,6 +404,8 @@ def main():
         binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
     elif run_type == "conversation":
         binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
+    elif run_type == "TOP-VIEW":
+        binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-top-view")
 
     # Check if the selected binary exists
     if(not check_binary(binary_path)):
@@ -388,7 +417,7 @@ def main():
 
     #If single batch with PAPI events or conversation mode, allow event selection. Otherwise skip to prompt input.
     events = []
-    if run_type == "single" or run_type == "conversation":
+    if run_type == "single" or run_type == "conversation" or run_type == "TOP-VIEW":
         events = select_events()
 
     #If KV cache measurement, detect cache type from model name. Otherwise skip to prompt input.
@@ -417,6 +446,8 @@ def main():
         run_all(model_path, prompt, n_predict, cache_type)
     elif run_type == "conversation":
         run_conversation_papi(model_path, events, prompt, n_predict, binary_path)
+    elif run_type == "TOP-VIEW":
+        run_top_view_papi(model_path, events, prompt, n_predict, binary_path)
 
 
 if __name__ == "__main__":
