@@ -350,6 +350,49 @@ async def get_measurements():
 
     return FileResponse(csv_path, media_type="text/csv")
 
+@app.get("/cpu_info")
+async def get_cpu_info():
+    """Get CPU architecture and model name using lscpu."""
+    try:
+        result = subprocess.run(["lscpu"], capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            raise Exception("lscpu command failed")
+
+        cpu_info = {}
+        for line in result.stdout.splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                cpu_info[key.strip()] = value.strip()
+
+        return {
+            "architecture": cpu_info.get("Architecture"),
+            "model_name": cpu_info.get("Model name"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting CPU info: {str(e)}")
+
+@app.get("/roofline_data")
+async def get_roofline_data():
+    """Serve hardcoded roofline data for frontend visualization."""
+    # This is a placeholder endpoint. In the future, this will serve actual data derived from PAPI profiling.
+    # For now, it returns the same hardcoded kernel examples used in the analysis endpoint.
+
+    data = {
+        "i7-1185G7": [
+            {"arithmetic_intensity": 0.16e9 / (10.135e-3 * HARDWARE["i7-1185G7"]["mem_bandwidth"]), "performance_gflops": 0.16e9 / 10.135e-3 / 1e9, "label": "preproc_baseline"},
+            {"arithmetic_intensity": 2.25e9 / (56.327e-3 * HARDWARE["i7-1185G7"]["mem_bandwidth"]), "performance_gflops": 2.25e9 / 56.327e-3 / 1e9, "label": "conv_baseline"},
+            {"arithmetic_intensity": 0.16e9 / (3.5e-3   * HARDWARE["i7-1185G7"]["mem_bandwidth"]), "performance_gflops": 0.16e9 / 3.5e-3 / 1e9,    "label": "preproc_optimized"},
+            {"arithmetic_intensity": 2.25e9 / (10.0e-3  * HARDWARE["i7-1185G7"]["mem_bandwidth"]), "performance_gflops": 2.25e9 / 10.0e-3 / 1e9,   "label": "conv_optimized"},
+        ],
+        "A100": [
+            {"arithmetic_intensity": 0.5,  "performance_gflops": 200,   "label": "Embedding lookup"},
+            {"arithmetic_intensity": 4.0,  "performance_gflops": 1500,  "label": "Attention (small)"},
+            {"arithmetic_intensity": 80.0, "performance_gflops": 8000,  "label": "GEMM (large)"},
+        ]
+    }
+
+    return data
+
 
 if __name__ == "__main__":
     import uvicorn
