@@ -460,17 +460,24 @@ int main(int argc, char ** argv) {
     int32_t total_tokens = (int32_t)conversation_tokens.size();
 
     //KV-CACHE
-    int32_t kv_tokens_used = (int32_t)conversation_tokens.size();
-    int32_t kv_tokens_capacity = n_ctx;
-
     int32_t n_layers = llama_model_n_layer(model);
     int32_t n_embd   = llama_model_n_embd(model);
-    int64_t kv_size_used = (int64_t)kv_tokens_used * n_layers * n_embd * sizeof(params.cache_type_k); // Assuming K and V have the same type and size, this is a simplification. For more accuracy, you could calculate K and V sizes separately based on their types.
-    int64_t kv_size_capacity = (int64_t)kv_tokens_capacity * n_layers * n_embd * sizeof(params.cache_type_k);
+    
+    // Bytes per element for each cache type
+    size_t k_elem_size = ggml_type_size(params.cache_type_k);
+    size_t v_elem_size = ggml_type_size(params.cache_type_v);
+    int32_t n_head_kv = llama_model_n_head_kv(model);
+    int32_t head_dim  = llama_model_n_embd(model) / llama_model_n_head(model);
+    int32_t kv_dim    = n_head_kv * head_dim;
 
-    if(params.cache_type_k != params.cache_type_v) {
-        printf("Warning: cache_type_k and cache_type_v are different, but kv_size calculations assume they are the same. Results may be inaccurate.\n");
-    }
+
+    llama_memory_t mem         = llama_get_memory(ctx);
+    llama_pos      kv_pos_max  = llama_memory_seq_pos_max(mem, 0);
+    int32_t kv_tokens_used     = (int32_t)kv_pos_max + 1;
+    int32_t kv_tokens_capacity = n_ctx;
+    size_t  kv_size_used       = llama_state_seq_get_size(ctx, 0);
+    int64_t kv_size_capacity   = (int64_t)kv_tokens_capacity * n_layers * kv_dim * (k_elem_size + v_elem_size);
+    int64_t kv_size_estimated = (int64_t)kv_tokens_used * n_layers * kv_dim * (k_elem_size + v_elem_size); // Estimated size based on tokens used
 
     //////////////////////////////////////////////
 
@@ -490,6 +497,7 @@ int main(int argc, char ** argv) {
     fprintf(out_file, "kv_tokens_used: %d\n", kv_tokens_used);
     fprintf(out_file, "kv_tokens_capacity: %d\n", kv_tokens_capacity);
     fprintf(out_file, "kv_size_used_bytes: %ld bytes\n", kv_size_used);
+    fprintf(out_file, "kv_size_estimated_bytes: %ld bytes\n", kv_size_estimated);
     fprintf(out_file, "kv_size_capacity_bytes: %ld bytes\n", kv_size_capacity);
     // Loop adds selected PAPI events to the output
      for (size_t i = 0; i < event_names.size(); i++) {

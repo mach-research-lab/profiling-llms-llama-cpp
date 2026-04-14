@@ -85,34 +85,50 @@ def select_events():
         if confirm == "y":
             return selected
 
-#--------- KV cache footprint  ---------
-def detect_cache_type(model_path: str) -> str:
-    """
-    Detect KV cache type from the model filename.
-    Maps common quantization suffixes to llama.cpp cache type names.
-    Falls back to f16 if nothing matches.
-    """
-    name = os.path.basename(model_path).lower()
+#--------- KV cache dtype selection  ---------
+def select_kv_cache_type():
+    cache_types = {
+        "1": ("f16",  "FP16 (default, recommended)"),
+        "2": ("f32",  "FP32 (higher precision, more memory)"),
+        "3": ("q8_0", "Q8_0 (quantized, less memory)"),
+        "4": ("q4_0", "Q4_0 (quantized, least memory)"),
+    }
 
-    # Map filename patterns to cache type
-    patterns = [
-        ("q8_0",  "q8_0"),
-        ("q6_k",  "q8_0"),   # Q6_K weights → use q8_0 cache (best match)
-        ("q4_k",  "q8_0"),   # Q4_K weights → use q8_0 cache
-        ("q4_0",  "q4_0"),
-        ("q5_0",  "q8_0"),
-        ("q5_k",  "q8_0"),
-        ("f32",   "f32"),
-        ("fp32",  "f32"),
-        ("f16",   "f16"),
-        ("fp16",  "f16"),
-    ]
+    print("\nUse default KV cache types? (F16 for both K and V)")
+    print("  1. Yes, use defaults")
+    print("  2. No, specify manually")
+    while True:
+        raw = input("> ").strip()
+        if raw == "" or raw == "1":
+            print("\n  ✓ K-cache: f16, V-cache: f16 (defaults)")
+            return "f16", "f16"
+        elif raw == "2":
+            break
+        else:
+            print("Invalid choice. Enter 1 or 2.")
 
-    for pattern, cache_type in patterns:
-        if pattern in name:
-            return cache_type
+    selected = {}
+    for cache in ("K", "V"):
+        print(f"\nSelect {cache}-cache data type:")
+        for key, (_, desc) in cache_types.items():
+            print(f"  {key}. {desc}")
 
-    return "f16"  # default
+        while True:
+            raw = input("> ").strip()
+            if raw == "":
+                raw = "1"  # default to f16
+            if raw not in cache_types:
+                print("Invalid choice. Enter 1, 2, 3, or 4.")
+                continue
+            cache_type, desc = cache_types[raw]
+            print(f"\n  ✓ {desc}")
+            confirm = input("Confirm? (y/n): ").strip().lower()
+            if confirm == "y":
+                selected[cache] = cache_type
+                break
+
+    print(f"\n  ✓ K-cache: {selected['K']}, V-cache: {selected['V']}")
+    return selected["K"], selected["V"]
 
 
 #--------- Common functions ---------
@@ -202,7 +218,7 @@ def run_conversation_papi(model_path, events, prompt, n_predict, binary_path):
     subprocess.run(cmd, cwd=LLAMA_ROOT)
 
 #Used for running llama-papi in TOP-VIEW mode (experimental)
-def run_top_view_papi(model_path, events, prompt, n_predict, cache_type, binary_path):
+def run_top_view_papi(model_path, events, prompt, n_predict, k_cache_type, v_cache_type, binary_path):
     event_names = [e[0] for e in events]
     events_arg = ",".join(event_names)
 
@@ -214,8 +230,8 @@ def run_top_view_papi(model_path, events, prompt, n_predict, cache_type, binary_
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),
-        "--cache-type-k", cache_type,
-        "--cache-type-v", cache_type,
+        "--cache-type-k", k_cache_type,
+        "--cache-type-v", v_cache_type,
         "--temp", "0",  # fixed temp for consistent measurements
         "--log-disable",
     ]
@@ -228,15 +244,15 @@ def run_top_view_papi(model_path, events, prompt, n_predict, cache_type, binary_
     subprocess.run(cmd, cwd=LLAMA_ROOT)
 
 #Used for running kv-measure
-def run_kv_measurement(model_path, prompt, n_predict, cache_type, binary_path):
+def run_kv_measurement(model_path, prompt, n_predict, k_cache_type, v_cache_type, binary_path):
     cmd = [
         binary_path,
         "--result-path", "kv_sizes.csv",
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),
-        "--cache-type-k", cache_type,
-        "--cache-type-v", cache_type,
+        "--cache-type-k", k_cache_type,
+        "--cache-type-v", v_cache_type,
         "--temp", "0",  # fixed temp for consistent measurements
         "--log-disable",
     ]
@@ -282,7 +298,7 @@ def run_energy(model_path, prompt, n_predict, binary_path):
 
 
 # --------- RUN ALL (Multi-batch with event groups) ---------
-def run_all(model_path, prompt, n_predict, cache_type):
+def run_all(model_path, prompt, n_predict, k_cache_type, v_cache_type):
     # Remove existing directory and recreate it fresh
     output_dir = os.path.join(LLAMA_ROOT, "run_all_results")
     if os.path.exists(output_dir):
@@ -383,9 +399,6 @@ def run_all(model_path, prompt, n_predict, cache_type):
         print(f"\n  ✗ kv_measurement.csv not found after run.")
 
 
-
-
-
 def main():
     print("═" * 66)
     print("   llama.cpp Profiler")
@@ -423,10 +436,11 @@ def main():
         events = select_events()
 
     #If KV cache measurement, detect cache type from model name. Otherwise skip to prompt input.
-    cache_type = None
+    k_cache_type = None
+    v_cache_type = None
     if run_type == "kv" or run_type == "all" or run_type == "TOP-VIEW":
-        cache_type = detect_cache_type(model_path)
-        print(f"\nDetected KV cache type: {cache_type}")
+        k_cache_type, v_cache_type = select_kv_cache_type()
+        print(f"\nSelected KV cache type: {k_cache_type}, {v_cache_type}")
 
     # ---- COMMON PROMPT AND N_PREDICT INPUT ----
     print("\nEnter your initial prompt:")
@@ -441,15 +455,15 @@ def main():
     if run_type == "single":
         run_single_papi(model_path, events, prompt, n_predict, binary_path)
     elif run_type == "kv":
-        run_kv_measurement(model_path, prompt, n_predict, cache_type, binary_path)
+        run_kv_measurement(model_path, prompt, n_predict, k_cache_type, v_cache_type, binary_path)
     elif run_type == "energy":
         run_energy(model_path, prompt, n_predict, binary_path)
     elif run_type == "all":
-        run_all(model_path, prompt, n_predict, cache_type)
+        run_all(model_path, prompt, n_predict, k_cache_type, v_cache_type)
     elif run_type == "conversation":
         run_conversation_papi(model_path, events, prompt, n_predict, binary_path)
     elif run_type == "TOP-VIEW":
-        run_top_view_papi(model_path, events, prompt, n_predict, cache_type, binary_path)
+        run_top_view_papi(model_path, events, prompt, n_predict, k_cache_type, v_cache_type, binary_path)
 
 
 if __name__ == "__main__":
