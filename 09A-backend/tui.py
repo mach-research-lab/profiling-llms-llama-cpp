@@ -54,6 +54,7 @@ def select_run_type():
         "3": ("kv",     "KV cache footprint"),
         "4": ("all",    "Run all (Multi-batch with event groups)"),
         "5": ("conversation", "Conversation mode with PAPI events"),
+        "6": ("TOP-VIEW", "Run TOP-VIEW measurements with PAPI events (experimental)"),
     }
 
     print("\nSelect run type:")
@@ -63,7 +64,7 @@ def select_run_type():
     while True:
         raw = input("> ").strip()
         if raw not in run_types:
-            print("Invalid choice. Enter 1, 2, 3, 4, or 5.")
+            print("Invalid choice. Enter 1, 2, 3, 4, 5, or 6.")
             continue
 
         key, desc = run_types[raw]
@@ -226,6 +227,36 @@ def run_conversation_papi(model_path, events, prompt, n_predict, binary_path, st
         cmd.extend(["--use-db", "--db-path", db_path])
 
     print(f"\nStarting conversation mode...")
+    print(f"Running: {' '.join(cmd)}\n")
+    print("You can type 'quit' or 'exit' to end the conversation.\n")
+
+    # Run interactively so user can input multiple turns
+    subprocess.run(cmd, cwd=LLAMA_ROOT)
+
+#Used for running llama-measurement-top-view in TOP-VIEW mode (experimental)
+def run_top_view_papi(model_path, events, prompt, n_predict, cache_type, binary_path, storage_type="file", db_path="profiling_data.db"):
+    event_names = [e[0] for e in events]
+    events_arg = ",".join(event_names)
+
+    cmd = [
+        binary_path,
+        "--papi-events", events_arg,
+        "--result-path", "top_view_measurements.csv",
+        "--conversation",  # Enable conversation mode for TOP-VIEW
+        "-m", model_path,
+        "-p", prompt,
+        "-n", str(n_predict),
+        "--cache-type-k", cache_type,
+        "--cache-type-v", cache_type,
+        "--temp", "0",  # fixed temp for consistent measurements
+        "--log-disable",
+    ]
+
+    # Add database flags based on storage type
+    if storage_type in ["database", "both"]:
+        cmd.extend(["--use-db", "--db-path", db_path])
+
+    print(f"\nStarting TOP-VIEW measurement with PAPI events...")
     print(f"Running: {' '.join(cmd)}\n")
     print("You can type 'quit' or 'exit' to end the conversation.\n")
 
@@ -407,7 +438,7 @@ def main():
     storage_type = "file"  # Default for energy and KV measurements
     db_path = os.path.join(LLAMA_ROOT, "profiling_data.db")
 
-    if run_type in ["single", "conversation", "all"]:
+    if run_type in ["single", "conversation", "all", "TOP-VIEW"]:
         storage_type = select_storage_type()
 
     #Add path to the correct binary based on the run type
@@ -421,6 +452,8 @@ def main():
         binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
     elif run_type == "conversation":
         binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
+    elif run_type == "TOP-VIEW":
+        binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-top-view")
 
     # Check if the selected binary exists
     if(not check_binary(binary_path)):
@@ -432,12 +465,12 @@ def main():
 
     #If single batch with PAPI events or conversation mode, allow event selection. Otherwise skip to prompt input.
     events = []
-    if run_type == "single" or run_type == "conversation":
+    if run_type == "single" or run_type == "conversation" or run_type == "TOP-VIEW":
         events = select_events()
 
     #If KV cache measurement, detect cache type from model name. Otherwise skip to prompt input.
     cache_type = None
-    if run_type == "kv" or run_type == "all":
+    if run_type == "kv" or run_type == "all" or run_type == "TOP-VIEW":
         cache_type = detect_cache_type(model_path)
         print(f"\nDetected KV cache type: {cache_type}")
 
@@ -461,6 +494,8 @@ def main():
         run_all(model_path, prompt, n_predict, cache_type, storage_type, db_path)
     elif run_type == "conversation":
         run_conversation_papi(model_path, events, prompt, n_predict, binary_path, storage_type, db_path)
+    elif run_type == "TOP-VIEW":
+        run_top_view_papi(model_path, events, prompt, n_predict, cache_type, binary_path, storage_type, db_path)
 
 
 if __name__ == "__main__":

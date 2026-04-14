@@ -1,0 +1,610 @@
+#include "arg.h"
+#include "common.h"
+#include "log.h"
+#include "llama.h"
+#include "llama-cpp.h"
+#include "sampling.h"
+#include <string>
+#include <vector>
+#include <iostream>
+#include <cstdio>
+#include <cstring>
+#include <time.h>
+#include <papi.h>
+#include <sqlite3.h>
+#include <sstream>
+
+#define MAX_PAPI_EVENTS 4
+
+// Used for multibatched runs to keep down amount of runs needed
+bool unrestricted_events_supported = false;
+bool conversation_mode = false;
+bool use_database = false;  // Flag to enable/disable database storage
+
+// --- DATABASE FUNCTIONALITY ---
+struct event_record {
+    int event_item_id;
+    int64_t run_id;
+    std::string phase;
+    int token_index;
+    std::string tensor_name;
+    std::string op_name;
+    int64_t duration_us;
+    size_t tensor_size;
+    int64_t n_elements;
+    std::vector<long long> papi_values;
+};
+
+// Initialize SQLite database schema
+static bool init_sqlite_schema(sqlite3* db) {
+    const char* schema_sql =
+        "CREATE TABLE IF NOT EXISTS event_item ("
+        "  event_item_id INTEGER PRIMARY KEY,"
+        "  run_id INTEGER NOT NULL,"
+        "  event_item_timestamp TEXT DEFAULT CURRENT_TIMESTAMP,"
+        "  event_phase TEXT NOT NULL,"
+        "  event_token_index INTEGER NOT NULL,"
+        "  event_tensor_name TEXT NOT NULL,"
+        "  event_operation_type TEXT NOT NULL,"
+        "  event_time_microseconds INTEGER NOT NULL,"
+        "  event_size_bytes INTEGER NOT NULL,"
+        "  event_n_elements INTEGER NOT NULL"
+        ");"
+        "CREATE TABLE IF NOT EXISTS event_papi_counter ("
+        "  event_item_id INTEGER NOT NULL,"
+        "  papi_event_name TEXT NOT NULL,"
+        "  papi_value INTEGER NOT NULL,"
+        "  FOREIGN KEY (event_item_id) REFERENCES event_item(event_item_id)"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_event_run ON event_item(run_id);"
+        "CREATE INDEX IF NOT EXISTS idx_papi_event ON event_papi_counter(event_item_id);";
+
+    char* err_msg = nullptr;
+    int rc = sqlite3_exec(db, schema_sql, nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error creating schema: %s\n", err_msg);
+        sqlite3_free(err_msg);
+        return false;
+    }
+    return true;
+}
+
+// Optimized batch insert using prepared statements and transactions
+static void batch_insert_to_database(sqlite3* db_conn, const std::vector<event_record>& records, const std::vector<std::string>& event_names) {
+    if (db_conn == nullptr || records.empty()) {
+        return;
+    }
+
+    printf("Inserting %zu records into SQLite database...\n", records.size());
+
+    // Begin transaction for performance
+    char* err_msg = nullptr;
+    if (sqlite3_exec(db_conn, "BEGIN TRANSACTION", nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        fprintf(stderr, "BEGIN transaction failed: %s\n", err_msg);
+        sqlite3_free(err_msg);
+        return;
+    }
+
+    // Prepare statements for reuse (massive performance improvement)
+    sqlite3_stmt* event_stmt = nullptr;
+    sqlite3_stmt* papi_stmt = nullptr;
+
+    const char* event_sql =
+        "INSERT INTO event_item (event_item_id, run_id, event_phase, event_token_index, "
+        "event_tensor_name, event_operation_type, event_time_microseconds, "
+        "event_size_bytes, event_n_elements) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    const char* papi_sql =
+        "INSERT INTO event_papi_counter (event_item_id, papi_event_name, papi_value) VALUES (?, ?, ?)";
+
+    if (sqlite3_prepare_v2(db_conn, event_sql, -1, &event_stmt, nullptr) != SQLITE_OK) {
+        fprintf(stderr, "Failed to prepare event statement: %s\n", sqlite3_errmsg(db_conn));
+        sqlite3_exec(db_conn, "ROLLBACK", nullptr, nullptr, nullptr);
+        return;
+    }
+
+    if (sqlite3_prepare_v2(db_conn, papi_sql, -1, &papi_stmt, nullptr) != SQLITE_OK) {
+        fprintf(stderr, "Failed to prepare papi statement: %s\n", sqlite3_errmsg(db_conn));
+        sqlite3_finalize(event_stmt);
+        sqlite3_exec(db_conn, "ROLLBACK", nullptr, nullptr, nullptr);
+        return;
+    }
+
+    // Insert all records using prepared statements
+    for (const auto& record : records) {
+        sqlite3_bind_int64(event_stmt, 1, record.event_item_id);
+        sqlite3_bind_int64(event_stmt, 2, record.run_id);
+        sqlite3_bind_text(event_stmt, 3, record.phase.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(event_stmt, 4, record.token_index);
+        sqlite3_bind_text(event_stmt, 5, record.tensor_name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(event_stmt, 6, record.op_name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(event_stmt, 7, record.duration_us);
+        sqlite3_bind_int64(event_stmt, 8, record.tensor_size);
+        sqlite3_bind_int64(event_stmt, 9, record.n_elements);
+
+        if (sqlite3_step(event_stmt) != SQLITE_DONE) {
+            fprintf(stderr, "INSERT into event_item failed: %s\n", sqlite3_errmsg(db_conn));
+            sqlite3_finalize(event_stmt);
+            sqlite3_finalize(papi_stmt);
+            sqlite3_exec(db_conn, "ROLLBACK", nullptr, nullptr, nullptr);
+            return;
+        }
+        sqlite3_reset(event_stmt);
+
+        // Insert PAPI counter data
+        for (size_t i = 0; i < event_names.size() && i < record.papi_values.size(); i++) {
+            sqlite3_bind_int64(papi_stmt, 1, record.event_item_id);
+            sqlite3_bind_text(papi_stmt, 2, event_names[i].c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(papi_stmt, 3, record.papi_values[i]);
+
+            if (sqlite3_step(papi_stmt) != SQLITE_DONE) {
+                fprintf(stderr, "INSERT into event_papi_counter failed: %s\n", sqlite3_errmsg(db_conn));
+                sqlite3_finalize(event_stmt);
+                sqlite3_finalize(papi_stmt);
+                sqlite3_exec(db_conn, "ROLLBACK", nullptr, nullptr, nullptr);
+                return;
+            }
+            sqlite3_reset(papi_stmt);
+        }
+    }
+
+    sqlite3_finalize(event_stmt);
+    sqlite3_finalize(papi_stmt);
+
+    // Commit transaction
+    if (sqlite3_exec(db_conn, "COMMIT", nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        fprintf(stderr, "COMMIT failed: %s\n", err_msg);
+        sqlite3_free(err_msg);
+        sqlite3_exec(db_conn, "ROLLBACK", nullptr, nullptr, nullptr);
+    } else {
+        printf("Successfully inserted %zu records into SQLite database.\n", records.size());
+    }
+}
+
+// --- MEASUREMENT FUNCTIONS ---
+
+// Helper to get current time in nanoseconds for high-resolution timing
+static inline int64_t now_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+// Helper to get current RSS memory usage in KB by reading /proc/self/status
+static inline int64_t get_peak_rss_kb() {
+    FILE* f = fopen("/proc/self/status", "r");
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "VmPeak:", 7) == 0) {
+            long kb;
+            sscanf(line + 7, "%ld", &kb);
+            fclose(f);
+            return kb;
+        }
+    }
+    fclose(f);
+    return -1;
+}
+
+// Helper to get average CPU usage percentage over a short interval by reading /proc/stat
+static inline int64_t get_cpu_time_ns() {
+    FILE* f = fopen("/proc/self/stat", "r");
+    if (!f) return -1;
+    long utime, stime;
+    int ret = fscanf(f, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %ld %ld", &utime, &stime);
+    fclose(f);
+    if (ret != 2) return -1;
+    long ticks_per_sec = sysconf(_SC_CLK_TCK);
+    return (utime + stime) * (1000000000L / ticks_per_sec);
+}
+
+
+// --- ARGUMENT PARSING ---
+
+// Parse --papi-events from argv before passing the rest to llama's parser.
+// Removes our custom flag so llama's parser doesn't choke on it.
+static std::vector<std::string> extract_args(int & argc, char ** argv, std::string & result_path, std::string & db_path) {
+    std::vector<std::string> events;
+    int write_idx = 1; // argv[0] stays
+
+    for (int i = 1; i < argc; i++) {
+        if (std::strcmp(argv[i], "--papi-events") == 0 && i + 1 < argc) {
+            std::string arg(argv[i + 1]);
+            size_t start = 0;
+            while (start < arg.size()) {
+                size_t end = arg.find(',', start);
+                if (end == std::string::npos) end = arg.size();
+                std::string name = arg.substr(start, end - start);
+                if (!name.empty()) events.push_back(name);
+                start = end + 1;
+            }
+            i++; // skip the value
+        } else if (std::strcmp(argv[i], "--result-path") == 0 && i + 1 < argc) {
+            result_path = argv[i + 1];
+            i++; // skip the value
+        } else if (std::strcmp(argv[i], "--db-path") == 0 && i + 1 < argc) {
+            db_path = argv[i + 1];
+            i++; // skip the value
+        } else if (std::strcmp(argv[i], "--use-db") == 0) {
+            use_database = true;
+        } else if (std::strcmp(argv[i], "--papi-events-unrestricted") == 0) {
+            unrestricted_events_supported = true;
+        } else if (std::strcmp(argv[i], "--conversation") == 0) {
+            conversation_mode = true;
+        } else {
+            argv[write_idx++] = argv[i]; // only forward unrecognized args
+        }
+
+    }
+    argc = write_idx;
+    return events;
+}
+
+
+// --- MAIN FUNCTION ---
+
+int main(int argc, char ** argv) {
+
+    // --- Extract our custom flags before llama arg parsing ---
+    std::string result_path = "measurements_top_view.csv";
+    std::string db_path = "profiling_data.db";
+    std::vector<std::string> event_names = extract_args(argc, argv, result_path, db_path);
+
+    // PAPI init
+    if (PAPI_library_init(PAPI_VER_CURRENT) != PAPI_VER_CURRENT) {
+        fprintf(stderr, "PAPI library init error!\n");
+        return 1;
+    }
+
+    int papi_event_set = PAPI_NULL;
+    int n_events = (int)event_names.size();
+
+    if (event_names.empty()) {
+        fprintf(stderr, "Error: no PAPI events specified.\n");
+        fprintf(stderr, "Usage: %s --papi-events PAPI_TOT_CYC,PAPI_TOT_INS,... [llama args]\n",
+            argv[0]);
+        return 1;
+    }
+    if (event_names.size() > MAX_PAPI_EVENTS && !unrestricted_events_supported) {
+        fprintf(stderr, "Error: maximum %d PAPI events supported, got %zu.\n",
+            MAX_PAPI_EVENTS, event_names.size());
+        return 1;
+    }
+    std::vector<long long> papi_values(n_events, 0);
+
+    if (PAPI_create_eventset(&papi_event_set) != PAPI_OK) {
+        fprintf(stderr, "PAPI create eventset error!\n");
+        return 1;
+    }
+
+    // Dynamically resolve and add events by name
+    for (const auto & name : event_names) {
+        int code = 0;
+        if (PAPI_event_name_to_code(name.c_str(), &code) != PAPI_OK) {
+            fprintf(stderr, "PAPI: unknown event '%s'\n", name.c_str());
+            return 1;
+        }
+        if (PAPI_add_event(papi_event_set, code) != PAPI_OK) {
+            fprintf(stderr, "PAPI: failed to add event '%s' (may conflict with other events)\n",
+                name.c_str());
+            return 1;
+        }
+        printf("PAPI: added event %s\n", name.c_str());
+    }
+
+    // --- SQLite init (only if --use-db flag is set) ---
+    sqlite3 *db_conn = nullptr;
+    if (use_database) {
+        int rc = sqlite3_open(db_path.c_str(), &db_conn);
+        if (rc != SQLITE_OK) {
+            fprintf(stderr, "Warning: Cannot open SQLite database: %s\n", sqlite3_errmsg(db_conn));
+            fprintf(stderr, "Continuing without database insertion (CSV only).\n");
+            sqlite3_close(db_conn);
+            db_conn = nullptr;
+            use_database = false;
+        } else {
+            printf("Successfully opened SQLite database: %s\n", db_path.c_str());
+
+            // Initialize schema
+            if (!init_sqlite_schema(db_conn)) {
+                fprintf(stderr, "Warning: Failed to initialize database schema.\n");
+                fprintf(stderr, "Continuing without database insertion (CSV only).\n");
+                sqlite3_close(db_conn);
+                db_conn = nullptr;
+                use_database = false;
+            } else {
+                // Enable performance optimizations
+                sqlite3_exec(db_conn, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
+                sqlite3_exec(db_conn, "PRAGMA synchronous=NORMAL", nullptr, nullptr, nullptr);
+                sqlite3_exec(db_conn, "PRAGMA cache_size=10000", nullptr, nullptr, nullptr);
+                sqlite3_exec(db_conn, "PRAGMA temp_store=MEMORY", nullptr, nullptr, nullptr);
+            }
+        }
+    }
+
+    // Generate unique run_id from max existing value in database
+    int64_t run_id = 1;  // Default if database is empty or unavailable
+    if (use_database && db_conn != nullptr) {
+        sqlite3_stmt* stmt = nullptr;
+        const char* sql = "SELECT COALESCE(MAX(run_id), 0) + 1 FROM event_item";
+        if (sqlite3_prepare_v2(db_conn, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                run_id = sqlite3_column_int64(stmt, 0);
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
+    printf("Run ID: %ld\n", run_id);
+
+    std::vector<event_record> pending_records;
+
+    // --- Open CSV and write dynamic header ---
+    FILE * out_file = fopen(result_path.c_str(), "w");
+    if (!out_file) {
+        fprintf(stderr, "Failed to open %s!\n", result_path.c_str());
+        return 1;
+    }
+
+    // --- Standard llama arg parsing and initialization ---
+    common_params params;
+
+    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
+        return 1;
+    }
+
+    common_init();
+    llama_backend_init();
+    llama_numa_init(params.numa);
+
+    // Currently no warmup, if we wan't more stable results this could possibly help?
+    params.warmup = false;
+
+    auto llama_init = common_init_from_params(params);
+    auto * model    = llama_init->model();
+    auto * ctx      = llama_init->context();
+
+    if (model == nullptr || ctx == nullptr) {
+        LOG_ERR("%s : failed to init\n", __func__);
+        return 1;
+    }
+
+    const llama_vocab * vocab     = llama_model_get_vocab(model);
+    const int           n_ctx     = llama_n_ctx(ctx);
+    const int           n_predict = params.n_predict < 0 ? 256 : params.n_predict;
+
+    auto * smpl = common_sampler_init(model, params.sampling);
+    std::vector<llama_token> conversation_tokens;  // Track all conversation tokens
+    int n_pos = 0;
+
+    std::vector<llama_chat_message> messages;
+    std::vector<char> formatted(n_ctx);
+    int prev_len = 0;
+    const char * tmpl = llama_model_chat_template(model, nullptr);
+
+
+    ///////// START OF TOP-LEVEL MEASUREMENTS ///////
+    int64_t model_size = llama_model_size(model);
+    double model_size_mb = (double)model_size / (1024.0 * 1024.0);
+    int64_t start_time = now_ns();
+    int64_t start_cpu_time = get_cpu_time_ns();
+    int32_t generated_tokens = 0;
+    PAPI_start(papi_event_set);
+    /////////////////////////////////////////////////
+
+    // Conversation loop
+    bool continue_conversation = true;
+    int turn_number = 0;
+
+    while (continue_conversation) {
+        turn_number++;
+        printf("\n--- Turn %d ---\n", turn_number);
+
+        std::string current_prompt;
+        if (turn_number == 1) {
+            // First turn: use the provided prompt
+            current_prompt = params.prompt;
+        } else {
+            // Subsequent turns: get new user input
+
+            // Stop timing while waiting for user input to get a more accurate measure of model performance
+            int64_t user_time = now_ns();
+            int64_t user_cpu_time = get_cpu_time_ns();
+
+            printf("\nUser (or 'quit' to exit): ");
+            std::getline(std::cin, current_prompt);
+
+
+            int64_t user_input_time = now_ns() - user_time;
+            int64_t user_input_cpu_time = get_cpu_time_ns() - user_cpu_time;
+
+            //Re-adjust start time to exclude user input time, so that our measurements reflect only model processing time
+            start_time += user_input_time; // Adjust start time to exclude user input time
+            start_cpu_time += user_input_cpu_time; // Adjust CPU time as well
+
+            if (current_prompt == "quit" || current_prompt == "exit" || current_prompt.empty()) {
+                printf("Ending conversation.\n");
+                break;
+            }
+        }
+
+        messages.push_back({"user", strdup(current_prompt.c_str())});
+        int new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+
+        if (new_len > (int)formatted.size()) {
+        formatted.resize(new_len);
+        new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+        }
+
+        std::string prompt_delta(formatted.begin() + prev_len, formatted.begin() + new_len);
+
+        // --- PHASE 1: Tokenization ---
+
+        const bool add_bos  = llama_vocab_get_add_bos(vocab);
+        std::vector<llama_token> new_tokens = common_tokenize(ctx, prompt_delta, add_bos, true);
+
+        if (new_tokens.empty()) {
+            LOG_ERR("%s : no input tokens\n", __func__);
+            continue;
+        }
+
+        // Add new tokens to conversation history
+        conversation_tokens.insert(conversation_tokens.end(), new_tokens.begin(), new_tokens.end());
+
+        // Check if we're exceeding context
+        if ((int)conversation_tokens.size() + n_predict > n_ctx) {
+            printf("Warning: Conversation history too long, truncating old tokens.\n");
+            int tokens_to_keep = n_ctx - n_predict - (int)new_tokens.size();
+            if (tokens_to_keep < 0) tokens_to_keep = 0;
+            conversation_tokens.erase(conversation_tokens.begin(),
+                                    conversation_tokens.end() - tokens_to_keep - (int)new_tokens.size());
+            conversation_tokens.insert(conversation_tokens.end(), new_tokens.begin(), new_tokens.end());
+        }
+
+        // PHASE 2: Prefill/Decode user input
+
+        if (llama_decode(ctx, llama_batch_get_one(new_tokens.data(), (int)new_tokens.size()))) {
+            LOG_ERR("%s : decode failed\n", __func__);
+            return 1;
+        }
+        printf("User input processed.\n");
+        n_pos = (int)conversation_tokens.size();
+
+        // PHASE 3 + 4: Generate assistant response
+        printf("Assistant: ");
+        fflush(stdout);
+
+        std::vector<llama_token> response_tokens;
+        for (int i = 0; i < n_predict; i++) {
+
+            // PHASE 3: Sampling
+            llama_token new_token = common_sampler_sample(smpl, ctx, -1);
+            common_sampler_accept(smpl, new_token, true);
+
+            std::string piece = common_token_to_piece(ctx, new_token);
+
+            if (llama_vocab_is_eog(vocab, new_token)) break; //Check if end of generation token
+
+            printf("%s", piece.c_str());
+            fflush(stdout);
+
+            response_tokens.push_back(new_token);
+            generated_tokens++;
+            conversation_tokens.push_back(new_token);
+
+            if (n_pos >= n_ctx - 1) {
+                printf("\n[Context limit reached]");
+                break;
+            }
+
+            // PHASE 4: Decode
+            if (llama_decode(ctx, llama_batch_get_one(&new_token, 1))) {
+                fprintf(stderr, "\nDecode failed\n");
+                break;
+            }
+            n_pos++;
+        }
+
+        printf("\n");
+
+        std::string response_text;
+        for (auto & tok : response_tokens) {
+            response_text += common_token_to_piece(ctx, tok);
+        }
+        // Update message history with assistant response
+        messages.push_back({"assistant", strdup(response_text.c_str())});
+        prev_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), false, nullptr, 0);
+        if (prev_len < 0) {
+            fprintf(stderr, "Failed to apply chat template\n");
+            prev_len = 0;
+        }
+
+        // Check if we should continue the conversation
+        if (!conversation_mode) {
+            // If not in conversation mode, only do one turn
+            continue_conversation = false;
+        }
+    }
+
+    ////// STOP TOP-LEVEL MEASUREMENTS ///////////
+    PAPI_stop(papi_event_set, papi_values.data());
+    int64_t end_time = now_ns();
+    int64_t end_cpu_time = get_cpu_time_ns();
+    int64_t end_rss_kb = get_peak_rss_kb();
+
+    //RUNTIME
+    int64_t runtime_ns = end_time - start_time;
+    double runtime_s = (double)runtime_ns / 1e9;
+
+    //CPU USAGE
+    int64_t cpu_time_ns = end_cpu_time - start_cpu_time;
+    double avg_cpu_usage = ((double)(cpu_time_ns * 100) / (double)runtime_ns) / (double)sysconf(_SC_NPROCESSORS_ONLN); // Adjust for number of CPU cores
+
+    //PEAK RSS
+    double rss_mb = (double)end_rss_kb / 1024.0; // Convert KB to MB
+
+    //TOKENS
+    double token_throughput = (double)generated_tokens / runtime_s;
+    int32_t total_tokens = (int32_t)conversation_tokens.size();
+
+    //KV-CACHE
+    int32_t kv_tokens_used = (int32_t)conversation_tokens.size();
+    int32_t kv_tokens_capacity = n_ctx;
+
+    int32_t n_layers = llama_model_n_layer(model);
+    int32_t n_embd   = llama_model_n_embd(model);
+    int64_t kv_size_used = (int64_t)kv_tokens_used * n_layers * n_embd * sizeof(params.cache_type_k); // Assuming K and V have the same type and size, this is a simplification. For more accuracy, you could calculate K and V sizes separately based on their types.
+    int64_t kv_size_capacity = (int64_t)kv_tokens_capacity * n_layers * n_embd * sizeof(params.cache_type_k);
+
+    if(params.cache_type_k != params.cache_type_v) {
+        printf("Warning: cache_type_k and cache_type_v are different, but kv_size calculations assume they are the same. Results may be inaccurate.\n");
+    }
+
+    //////////////////////////////////////////////
+
+    printf("\n--- Conversation ended ---\n");
+
+    // Write results to CSV in top-view format
+    fprintf(out_file, "TOP_VIEW\n");
+    fprintf(out_file, "model_size: %ld bytes\n", model_size);
+    fprintf(out_file, "model_size_mb: %.2f MB\n", model_size_mb);
+    fprintf(out_file, "runtime_ns: %ld ns\n", runtime_ns);
+    fprintf(out_file, "runtime_s: %.2f s\n", runtime_s);
+    fprintf(out_file, "Peak_RSS_MB: %.2f MB\n", rss_mb);
+    fprintf(out_file, "AVG_CPU_usage: %.2f%%\n", avg_cpu_usage);
+    fprintf(out_file, "generated_tokens: %d\n", generated_tokens);
+    fprintf(out_file, "total_tokens: %d\n", total_tokens);
+    fprintf(out_file, "token_throughput: %.2f tokens/s\n", token_throughput);
+    fprintf(out_file, "kv_tokens_used: %d\n", kv_tokens_used);
+    fprintf(out_file, "kv_tokens_capacity: %d\n", kv_tokens_capacity);
+    fprintf(out_file, "kv_size_used_bytes: %ld bytes\n", kv_size_used);
+    fprintf(out_file, "kv_size_capacity_bytes: %ld bytes\n", kv_size_capacity);
+    // Loop adds selected PAPI events to the output
+    for (size_t i = 0; i < event_names.size(); i++) {
+        fprintf(out_file, "%s: %lld\n", event_names[i].c_str(), papi_values[i]);
+    }
+
+
+    // Clean up
+    common_sampler_free(smpl);
+    fclose(out_file);
+    PAPI_destroy_eventset(&papi_event_set);
+    PAPI_shutdown();
+    llama_backend_free();
+
+    // Batch insert all accumulated records into database
+    if (use_database && db_conn != nullptr) {
+        batch_insert_to_database(db_conn, pending_records, event_names);
+    }
+
+    // Clean up database connection
+    if (db_conn != nullptr) {
+        sqlite3_close(db_conn);
+        printf("SQLite database closed.\n");
+    }
+
+    printf("Measurements saved to %s\n", result_path.c_str());
+    if (use_database && db_conn != nullptr) {
+        printf("Data also inserted into SQLite database: %s\n", db_path.c_str());
+    }
+    return 0;
+}
