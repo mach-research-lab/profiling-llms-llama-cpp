@@ -1,3 +1,5 @@
+//TODO: ADD DATABASE FUNCTIOONALITY
+
 #include "arg.h"
 #include "common.h"
 #include "log.h"
@@ -11,93 +13,14 @@
 #include <cstring>
 #include <time.h>
 #include <papi.h>
-#include <libpq-fe.h>
 #include <sstream>
+#include <thread>
 
 #define MAX_PAPI_EVENTS 4
 
 // Used for multibatched runs to keep down amount of runs needed
 bool unrestricted_events_supported = false;
 bool conversation_mode = false;
-
-// --- DATABASE FUNCTIONALITY ---
-struct event_record {
-    int event_item_id;
-    int64_t run_id;
-    std::string phase;
-    int token_index;
-    std::string tensor_name;
-    std::string op_name;
-    int64_t duration_us;
-    size_t tensor_size;
-    int64_t n_elements;
-    std::vector<long long> papi_values;
-};
-
-
-static void batch_insert_to_database(PGconn* db_conn, const std::vector<event_record>& records, const std::vector<std::string>& event_names) {
-    if (db_conn == nullptr || PQstatus(db_conn) != CONNECTION_OK || records.empty()) {
-        return;
-    }
-
-    printf("Inserting %zu records into database...\n", records.size());
-
-    // Begin transaction
-    PGresult *res = PQexec(db_conn, "BEGIN");
-    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-        fprintf(stderr, "BEGIN transaction failed: %s\n", PQerrorMessage(db_conn));
-        PQclear(res);
-        return;
-    }
-    PQclear(res);
-
-    // Insert all event_item records
-    for (const auto& record : records) {
-        std::ostringstream query;
-        query << "INSERT INTO event_item (event_item_id, run_id, event_item_timestamp, event_phase, "
-              << "event_token_index, event_tensor_name, event_operation_type, "
-              << "event_time_microseconds, event_size_bytes, event_n_elements) VALUES ("
-              << record.event_item_id << ", " << record.run_id << ", NOW(), '" << record.phase << "', "
-              << record.token_index << ", '" << record.tensor_name << "', '" << record.op_name << "', "
-              << record.duration_us << ", " << record.tensor_size << ", " << record.n_elements << ");";
-
-        res = PQexec(db_conn, query.str().c_str());
-        if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-            fprintf(stderr, "INSERT into event_item failed: %s\n", PQerrorMessage(db_conn));
-            PQclear(res);
-            PQexec(db_conn, "ROLLBACK");
-            return;
-        }
-        PQclear(res);
-
-        // Insert PAPI counter data
-        for (size_t i = 0; i < event_names.size() && i < record.papi_values.size(); i++) {
-            std::ostringstream papi_query;
-            papi_query << "INSERT INTO event_papi_counter (event_item_id, papi_event_name, papi_value) VALUES ("
-                       << record.event_item_id << ", '" << event_names[i] << "', "
-                       << record.papi_values[i] << ");";
-
-            res = PQexec(db_conn, papi_query.str().c_str());
-            if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-                fprintf(stderr, "INSERT into event_papi_counter failed: %s\n", PQerrorMessage(db_conn));
-                PQclear(res);
-                PQexec(db_conn, "ROLLBACK");
-                return;
-            }
-            PQclear(res);
-        }
-    }
-
-    // Commit transaction
-    res = PQexec(db_conn, "COMMIT");
-    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-        fprintf(stderr, "COMMIT failed: %s\n", PQerrorMessage(db_conn));
-        PQexec(db_conn, "ROLLBACK");
-    } else {
-        printf("Successfully inserted %zu records into database.\n", records.size());
-    }
-    PQclear(res);
-}
 
 // --- MEASUREMENT FUNCTIONS ---
 
@@ -124,19 +47,143 @@ static inline int64_t get_peak_rss_kb() {
     return -1;
 }
 
-// Helper to get average CPU usage percentage over a short interval by reading /proc/stat
-static inline int64_t get_cpu_time_ns() {
-    FILE* f = fopen("/proc/self/stat", "r");
-    if (!f) return -1;
-    long utime, stime;
-    int ret = fscanf(f, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %ld %ld", &utime, &stime);
+struct CoreStat {
+    long long user, nice, system, idle, iowait, irq, softirq;
+};
+
+// Helper to read CPU core stats for utilization calculation
+CoreStat read_core_stat(int core_id) {
+    FILE* f = fopen("/proc/stat", "r");
+    char line[256];
+    CoreStat s = {};
+    while (fgets(line, sizeof(line), f)) {
+        char label[16];
+        // Lines look like: "cpu0 1234 56 789 ..."
+        if (sscanf(line, "%s", label) == 1) {
+            std::string target = "cpu" + std::to_string(core_id);
+            if (std::string(label) == target) {
+                sscanf(line, "%*s %lld %lld %lld %lld %lld %lld %lld",
+                    &s.user, &s.nice, &s.system, &s.idle,
+                    &s.iowait, &s.irq, &s.softirq);
+                break;
+            }
+        }
+    }
     fclose(f);
-    if (ret != 2) return -1;
-    long ticks_per_sec = sysconf(_SC_CLK_TCK);
-    return (utime + stime) * (1000000000L / ticks_per_sec);
+    return s;
+}
+
+// Helper to calculate CPU core utilization percentage between two CoreStat snapshots
+double core_utilization(const CoreStat& before, const CoreStat& after) {
+    long long idle_delta  = (after.idle + after.iowait) - (before.idle + before.iowait);
+    long long total_delta = (after.user + after.nice + after.system + after.idle +
+                             after.iowait + after.irq + after.softirq) -
+                            (before.user + before.nice + before.system + before.idle +
+                             before.iowait + before.irq + before.softirq);
+    if (total_delta == 0) return 0.0;
+    return 100.0 * (1.0 - (double)idle_delta / total_delta);
+}
+
+// Helper to accumulate core stats deltas into an accumulator vector for averaging later
+void accumulate_core_stats(std::vector<CoreStat>& accum,
+                           const std::vector<CoreStat>& before,
+                           const std::vector<CoreStat>& after,
+                           int n_logical) {
+    for (int c = 0; c < n_logical; c++) {
+        accum[c].user    += after[c].user    - before[c].user;
+        accum[c].nice    += after[c].nice    - before[c].nice;
+        accum[c].system  += after[c].system  - before[c].system;
+        accum[c].idle    += after[c].idle    - before[c].idle;
+        accum[c].iowait  += after[c].iowait  - before[c].iowait;
+        accum[c].irq     += after[c].irq     - before[c].irq;
+        accum[c].softirq += after[c].softirq - before[c].softirq;
+    }
+}
+
+// Returns a map of physical_core_id -> list of logical CPU ids
+std::map<int, std::vector<int>> get_physical_core_map() {
+    std::map<int, std::vector<int>> core_map;
+    int logical = std::thread::hardware_concurrency();
+
+    for (int i = 0; i < logical; i++) {
+        char path[128];
+        snprintf(path, sizeof(path),
+            "/sys/devices/system/cpu/cpu%d/topology/core_id", i);
+        FILE* f = fopen(path, "r");
+        if (f) {
+            int core_id;
+            if (fscanf(f, "%d", &core_id) == 1) {
+                core_map[core_id].push_back(i);
+            }
+            fclose(f);
+        }
+    }
+    return core_map;
 }
 
 
+struct CPUTopology {
+    int logical_id;
+    int core_id;
+    int socket_id;
+};
+
+std::vector<CPUTopology> get_full_topology() {
+    std::vector<CPUTopology> topology;
+    int n_logical = std::thread::hardware_concurrency();
+    for (int i = 0; i < n_logical; i++) {
+        CPUTopology t;
+        t.logical_id = i;
+        char path[256];
+        snprintf(path, sizeof(path),
+            "/sys/devices/system/cpu/cpu%d/topology/core_id", i);
+        FILE* f = fopen(path, "r");
+        if (f) { 
+            if(fscanf(f, "%d", &t.core_id) != 1) t.core_id = -1; // Fallback if parsing fails
+            fclose(f); 
+        }
+        snprintf(path, sizeof(path),
+            "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", i);
+        f = fopen(path, "r");
+        if (f) { 
+            if(fscanf(f, "%d", &t.socket_id) != 1) t.socket_id = -1; // Fallback if parsing fails
+            fclose(f); 
+        }
+        topology.push_back(t);
+    }
+    return topology;
+}
+
+
+// ---- CSV PRESENTATION FUNCTIONS ----
+void write_papi_values(FILE * out_file, const std::vector<std::string> & event_names, const std::vector<long long> & values) {
+    for (size_t i = 0; i < event_names.size(); i++) {
+        fprintf(out_file, "%s: %lld\n", event_names[i].c_str(), values[i]);
+    }
+}
+
+void write_core_utils(FILE * out_file, const std::vector<CoreStat>& accum) {
+    auto topo = get_full_topology();
+    std::map<int, std::map<int, std::vector<int>>> socket_map;
+    for (auto& t : topo)
+        socket_map[t.socket_id][t.core_id].push_back(t.logical_id);
+
+    for (auto& [sock, cores] : socket_map) {
+        fprintf(out_file, "Socket %d:\n", sock);
+        for (auto& [core, logical_cpus] : cores) {
+            fprintf(out_file, "  Core %d ----\n", core);
+            for (int lc : logical_cpus) {
+                const CoreStat& s = accum[lc];
+                long long idle  = s.idle + s.iowait;
+                long long total = s.user + s.nice + s.system + s.idle
+                                + s.iowait + s.irq + s.softirq;
+                // Calculate average utilization percentage for this logical CPU
+                double util = total > 0 ? 100.0 * (1.0 - (double)idle / total) : 0.0;
+                fprintf(out_file, "    Thread %d: %.1f%%\n", lc, util);
+            }
+        }
+    }
+}
 // --- ARGUMENT PARSING ---
 
 // Parse --papi-events from argv before passing the rest to llama's parser.
@@ -173,36 +220,9 @@ static std::vector<std::string> extract_args(int & argc, char ** argv, std::stri
     return events;
 }
 
-
 // --- MAIN FUNCTION ---
 
 int main(int argc, char ** argv) {
-
-    // --- PostgreSQL init ---
-    const char *db_conninfo = "host=localhost port=5434 dbname=toolDB user=user password=pass";
-    PGconn *db_conn = PQconnectdb(db_conninfo);
-
-    if (PQstatus(db_conn) != CONNECTION_OK) {
-        fprintf(stderr, "Warning: Connection to database failed: %s\n", PQerrorMessage(db_conn));
-        fprintf(stderr, "Continuing without database insertion (CSV only).\n");
-        PQfinish(db_conn);
-        db_conn = nullptr;
-    } else {
-        printf("Successfully connected to PostgreSQL database.\n");
-    }
-
-    // Generate unique run_id by incrementing from the max existing run_id in database
-    int64_t run_id = 1;  // Default if database is empty or unavailable
-    if (db_conn != nullptr) {
-        PGresult *res = PQexec(db_conn, "SELECT COALESCE(MAX(run_id), 0) + 1 FROM event_item");
-        if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0) {
-            run_id = atoll(PQgetvalue(res, 0, 0));
-        }
-        PQclear(res);
-    }
-    printf("Run ID: %ld\n", run_id);
-
-    std::vector<event_record> pending_records;
 
     // --- Extract our custom flag before llama arg parsing and initialization ---
     std::string result_path = "measurements_top_view.csv";
@@ -228,8 +248,12 @@ int main(int argc, char ** argv) {
             MAX_PAPI_EVENTS, event_names.size());
         return 1;
     }
-    std::vector<long long> papi_values(n_events, 0);
 
+    //Create PAPI value vectors for each phase 
+    std::vector<long long> papi_values_tokenizing(n_events, 0);
+    std::vector<long long> papi_values_prefill(n_events, 0);
+    std::vector<long long> papi_values_decode(n_events, 0);
+    std::vector<long long> papi_values_sampling(n_events, 0);
 
     if (PAPI_create_eventset(&papi_event_set) != PAPI_OK) {
         fprintf(stderr, "PAPI create eventset error!\n");
@@ -296,10 +320,27 @@ int main(int argc, char ** argv) {
     
 
     ///////// MEASUREMENTS HOLDERS //////////////////
+
+    int n_logical = std::thread::hardware_concurrency();
+    std::map<int, std::vector<int>> core_map = get_physical_core_map();
+
+    //Tokenization
+    std::vector<CoreStat> before_tokenization(n_logical), after_tokenization(n_logical);
+    std::vector<CoreStat> accum_tokenization(n_logical, {0,0,0,0,0,0,0});
     int64_t time_spent_tokenizing = 0;
-    int64_t time_spent_prefill = 0;
-    int64_t time_spent_decode = 0;
+    //Sampling
+    std::vector<CoreStat> before_sampling(n_logical), after_sampling(n_logical);
+    std::vector<CoreStat> accum_sampling(n_logical, {0,0,0,0,0,0,0});
     int64_t time_spent_sampling = 0;
+    //Prefill
+    std::vector<CoreStat> before_prefill(n_logical), after_prefill(n_logical);
+    std::vector<CoreStat> accum_prefill(n_logical, {0,0,0,0,0,0,0});
+    int64_t time_spent_prefill = 0;
+    //Decode
+    std::vector<CoreStat> before_decode(n_logical), after_decode(n_logical);
+    std::vector<CoreStat> accum_decode(n_logical, {0,0,0,0,0,0,0});
+    int64_t time_spent_decode = 0;
+
     /////////////////////////////////////////////////
 
     // Conversation loop
@@ -329,8 +370,8 @@ int main(int argc, char ** argv) {
         int new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
 
         if (new_len > (int)formatted.size()) {
-        formatted.resize(new_len);
-        new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+            formatted.resize(new_len);
+            new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
         }
 
         std::string prompt_delta(formatted.begin() + prev_len, formatted.begin() + new_len);
@@ -339,7 +380,10 @@ int main(int argc, char ** argv) {
         
         //////// TOKENIZATION MEASUREMENTS START HERE /////////////
 
+        
+        for (int c = 0; c < n_logical; c++) before_tokenization[c] = read_core_stat(c);
         int64_t tokenization_start = now_ns();
+        PAPI_start(papi_event_set);
 
         ///////////////////////////////////////////////////////////
 
@@ -366,8 +410,10 @@ int main(int argc, char ** argv) {
         }
 
         //////// TOKENIZATION MEASUREMENTS ENDS HERE /////////////
-
+        PAPI_stop(papi_event_set, papi_values_tokenizing.data());
         time_spent_tokenizing += now_ns() - tokenization_start;
+        for (int c = 0; c < n_logical; c++) after_tokenization[c] = read_core_stat(c);
+        accumulate_core_stats(accum_tokenization, before_tokenization, after_tokenization, n_logical);
 
         ///////////////////////////////////////////////////////////
 
@@ -376,9 +422,9 @@ int main(int argc, char ** argv) {
 
 
         //////// PREFILL MEASUREMENTS STARTS HERE /////////////
-
+        for (int c = 0; c < n_logical; c++) before_prefill[c] = read_core_stat(c);
         int64_t prefill_start = now_ns();
-
+        PAPI_start(papi_event_set);
         ///////////////////////////////////////////////////////////
 
         if (llama_decode(ctx, llama_batch_get_one(new_tokens.data(), (int)new_tokens.size()))) {
@@ -387,9 +433,10 @@ int main(int argc, char ** argv) {
         }
 
         //////// PREFILL MEASUREMENTS ENDS HERE /////////////
-
+        PAPI_stop(papi_event_set, papi_values_prefill.data());
         time_spent_prefill += now_ns() - prefill_start;
-
+        for (int c = 0; c < n_logical; c++) after_prefill[c] = read_core_stat(c);
+        accumulate_core_stats(accum_prefill, before_prefill, after_prefill, n_logical);
         ///////////////////////////////////////////////////////////
 
         printf("User input processed.\n");
@@ -405,9 +452,9 @@ int main(int argc, char ** argv) {
             // PHASE 3: Sampling ----------------------------------------
 
             //////// SAMPLING MEASUREMENTS STARTS HERE //////////////////
-
+            for (int c = 0; c < n_logical; c++) before_sampling[c] = read_core_stat(c);
             int64_t sampling_start = now_ns();
-
+            PAPI_start(papi_event_set);
             /////////////////////////////////////////////////////////////
 
             llama_token new_token = common_sampler_sample(smpl, ctx, -1);
@@ -419,8 +466,10 @@ int main(int argc, char ** argv) {
 
             //////// SAMPLING MEASUREMENTS ENDSHERE /////////////////////
 
+            PAPI_stop(papi_event_set, papi_values_sampling.data());
             time_spent_sampling += now_ns() - sampling_start;
-
+            for (int c = 0; c < n_logical; c++) after_sampling[c] = read_core_stat(c);
+            accumulate_core_stats(accum_sampling, before_sampling, after_sampling, n_logical);
             /////////////////////////////////////////////////////////////
 
             printf("%s", piece.c_str());
@@ -437,8 +486,9 @@ int main(int argc, char ** argv) {
             // PHASE 4: Decode ------------------------------------------
 
             //////// DECODE MEASUREMENTS STARTS HERE //////////////////
-
+            for (int c = 0; c < n_logical; c++) before_decode[c] = read_core_stat(c);
             int64_t decode_start = now_ns();
+            PAPI_start(papi_event_set);
 
             /////////////////////////////////////////////////////////////
 
@@ -450,8 +500,10 @@ int main(int argc, char ** argv) {
 
             //////// DECODE MEASUREMENTS ENDS HERE /////////////////////
 
+            PAPI_stop(papi_event_set, papi_values_decode.data());
             time_spent_decode += now_ns() - decode_start;
-
+            for (int c = 0; c < n_logical; c++) after_decode[c] = read_core_stat(c);
+            accumulate_core_stats(accum_decode, before_decode, after_decode, n_logical);
             /////////////////////////////////////////////////////////////
             
             n_pos++;
@@ -478,10 +530,6 @@ int main(int argc, char ** argv) {
         }
     }
 
-    ////// STOP TOP-LEVEL MEASUREMENTS ///////////
-    PAPI_stop(papi_event_set, papi_values.data());
-
-    //RUNTIME
     
     //////////////////////////////////////////////
 
@@ -489,16 +537,23 @@ int main(int argc, char ** argv) {
 
     // Write results to CSV in top-view format
     fprintf(out_file, "PHASE_VIEW\n");
-    fprintf(out_file, "Time spent tokanizing: %ld ns\n", time_spent_tokenizing);
-    fprintf(out_file, "Time spent in prefill: %ld ns\n", time_spent_prefill);
-    fprintf(out_file, "Time spent in decode: %ld ns\n", time_spent_decode);
-    fprintf(out_file, "Time spent in sampling: %ld ns\n", time_spent_sampling);
-    // Loop adds selected PAPI events to the output
-     for (size_t i = 0; i < event_names.size(); i++) {
-        fprintf(out_file, "%s: %lld\n", event_names[i].c_str(), papi_values[i]);
-    }
+    fprintf(out_file, "--------------- TOKENIZATION ---------------\n");
+    fprintf(out_file, "Time spent: %ld ns\n", time_spent_tokenizing);
+    write_papi_values(out_file, event_names, papi_values_tokenizing);
+    write_core_utils(out_file, accum_tokenization);
+    fprintf(out_file, "--------------- SAMPLING -------------------\n");
+    fprintf(out_file, "Time spent: %ld ns\n", time_spent_sampling);
+    write_papi_values(out_file, event_names, papi_values_sampling);
+    write_core_utils(out_file, accum_sampling);
+    fprintf(out_file, "--------------- PREFILL --------------------\n");
+    fprintf(out_file, "Time spent: %ld ns\n", time_spent_prefill);
+    write_papi_values(out_file, event_names, papi_values_prefill);
+    write_core_utils(out_file, accum_prefill);
+    fprintf(out_file, "--------------- DECODE ---------------------\n");
+    fprintf(out_file, "Time spent: %ld ns\n", time_spent_decode);
+    write_papi_values(out_file, event_names, papi_values_decode);
+    write_core_utils(out_file, accum_decode);
 
-   
     // Clean up
     common_sampler_free(smpl);
     fclose(out_file);
@@ -506,21 +561,7 @@ int main(int argc, char ** argv) {
     PAPI_shutdown();
     llama_backend_free();
 
-    // Batch insert all accumulated records into database
-    if (db_conn != nullptr) {
-        batch_insert_to_database(db_conn, pending_records, event_names);
-    }
-
-
-    // Clean up database connection
-    if (db_conn != nullptr) {
-        PQfinish(db_conn);
-        printf("Database connection closed.\n");
-    }
-
     printf("Measurements saved to %s\n", result_path.c_str());
-    if (db_conn != nullptr) {
-        printf("Data also inserted into PostgreSQL database.\n");
-    }
+    
     return 0;
 }
