@@ -20,4 +20,9 @@ build*/
 .devops/
 .gemini/
 
+models/*
+!models/README.md
+!models/download_model.py
+!models/.gitignore
+
 
