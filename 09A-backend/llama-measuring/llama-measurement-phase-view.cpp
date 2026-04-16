@@ -4,7 +4,6 @@
 #include "common.h"
 #include "log.h"
 #include "llama.h"
-#include "llama-cpp.h"
 #include "sampling.h"
 #include <string>
 #include <vector>
@@ -13,10 +12,23 @@
 #include <cstring>
 #include <time.h>
 #include <papi.h>
-#include <sstream>
 #include <thread>
+#include "energy-measure.h"
+#include <nlohmann/json.hpp> //Already inlcuded in llama.cpp
+#include <fstream>
 
 #define MAX_PAPI_EVENTS 4
+
+/* What this file should measure:
+● Time spent: the sum of time for these two phases should be equal to the total runtime.
+● FLOPs
+● Bytes moved
+● Arithmetic intensity: yes also part of roofline
+● LLC misses and hits
+● IPC
+● Energy
+● Core utilization
+*/
 
 // Used for multibatched runs to keep down amount of runs needed
 bool unrestricted_events_supported = false;
@@ -154,6 +166,109 @@ std::vector<CPUTopology> get_full_topology() {
     return topology;
 }
 
+struct Phase_Metrics {
+    std::string phase_name;
+    int64_t runtime_ns = 0;
+    std::vector<long long> papi_values;
+    std::vector<CoreStat> core_accum;
+    uint64_t energy_accum[N_DOMAINS] = {};
+};
+
+struct Run_Metrics {
+    Phase_Metrics tokenization;
+    Phase_Metrics sampling;
+    Phase_Metrics prefill;
+    Phase_Metrics decode;
+};
+
+
+// --- JSON PRESENTATION FUNCTIONS ---
+
+nlohmann::json core_utilization_to_json(const std::vector<CoreStat>& accum) {
+    auto topo = get_full_topology();
+    std::map<int, std::map<int, std::vector<int>>> socket_map;
+    for (auto& t : topo)
+        socket_map[t.socket_id][t.core_id].push_back(t.logical_id);
+
+    nlohmann::json sockets = nlohmann::json::object();
+    for (auto& [sock, cores] : socket_map) {
+        nlohmann::json cores_json = nlohmann::json::object();
+        for (auto& [core, logical_cpus] : cores) {
+            nlohmann::json threads_json = nlohmann::json::object();
+            for (int lc : logical_cpus) {
+                const CoreStat& s = accum[lc];
+                long long idle  = s.idle + s.iowait;
+                long long total = s.user + s.nice + s.system + s.idle
+                                + s.iowait + s.irq + s.softirq;
+                double util = total > 0 ? 100.0 * (1.0 - (double)idle / total) : 0.0;
+                threads_json["thread_" + std::to_string(lc)] = util;
+            }
+            cores_json["core_" + std::to_string(core)] = threads_json;
+        }
+        sockets["socket_" + std::to_string(sock)] = cores_json;
+    }
+    return sockets;
+}
+
+nlohmann::json energy_to_json(const perf_energy& e, const uint64_t accum[N_DOMAINS]) {
+    nlohmann::json result = nlohmann::json::object();
+    for (int i = 0; i < N_DOMAINS; i++) {
+        if (e.ok[i])
+            result[DOMAIN_NAMES[i]] = energy_to_uj(e, i, accum[i]);
+        else
+            result[DOMAIN_NAMES[i]] = nullptr;
+    }
+    return result;
+}
+
+nlohmann::json phase_to_json(const Phase_Metrics& phase,
+                   const std::vector<std::string>& event_names,
+                   const perf_energy& energy) {
+    nlohmann::json j;
+    j["runtime_ns"] = phase.runtime_ns;
+
+    for (size_t i = 0; i < event_names.size(); i++)
+        j[event_names[i]] = phase.papi_values[i];
+
+    j["core_utilization"] = core_utilization_to_json(phase.core_accum);
+    j["energy"]           = energy_to_json(energy, phase.energy_accum);
+
+    return j;
+}
+
+void write_metrics_to_json(const std::string& result_path,
+                           const Run_Metrics& metrics,
+                           const std::vector<std::string>& event_names,
+                           const perf_energy& energy) {
+    // Read existing JSON if it exists
+    nlohmann::json j = nlohmann::json::object();
+    std::ifstream in(result_path);
+    if (in.good()) {
+        j = nlohmann::json::parse(in, nullptr, false);
+        if (j.is_discarded()) j = nlohmann::json::object();
+    }
+    in.close();
+
+    // Merge new PAPI fields into existing phases, or create them
+    auto merge_phase = [&](const std::string& key, const Phase_Metrics& phase) {
+        nlohmann::json pj = phase_to_json(phase, event_names, energy);
+        if (j.contains(key)) {
+            // Merge only PAPI values into existing entry
+            for (const auto& name : event_names)
+                j[key][name] = pj[name];
+        } else {
+            j[key] = pj;
+        }
+    };
+
+    merge_phase("tokenization", metrics.tokenization);
+    merge_phase("sampling",     metrics.sampling);
+    merge_phase("prefill",      metrics.prefill);
+    merge_phase("decode",       metrics.decode);
+
+    std::ofstream out(result_path);
+    out << j.dump(2);
+}
 
 // ---- CSV PRESENTATION FUNCTIONS ----
 void write_papi_values(FILE * out_file, const std::vector<std::string> & event_names, const std::vector<long long> & values) {
@@ -162,7 +277,7 @@ void write_papi_values(FILE * out_file, const std::vector<std::string> & event_n
     }
 }
 
-void write_core_utils(FILE * out_file, const std::vector<CoreStat>& accum) {
+void write_core_utilisation(FILE * out_file, const std::vector<CoreStat>& accum) {
     auto topo = get_full_topology();
     std::map<int, std::map<int, std::vector<int>>> socket_map;
     for (auto& t : topo)
@@ -182,6 +297,16 @@ void write_core_utils(FILE * out_file, const std::vector<CoreStat>& accum) {
                 fprintf(out_file, "    Thread %d: %.1f%%\n", lc, util);
             }
         }
+    }
+}
+
+void write_energy_accum(FILE * out_file, const perf_energy & e, const uint64_t accum[N_DOMAINS]) {
+    for (int i = 0; i < N_DOMAINS; i++) {
+        if (e.ok[i])
+            fprintf(out_file, "%s: %.2f uJ\n", DOMAIN_NAMES[i],
+                    energy_to_uj(e, i, accum[i]));
+        else
+            fprintf(out_file, "%s: not available\n", DOMAIN_NAMES[i]);
     }
 }
 // --- ARGUMENT PARSING ---
@@ -225,8 +350,13 @@ static std::vector<std::string> extract_args(int & argc, char ** argv, std::stri
 int main(int argc, char ** argv) {
 
     // --- Extract our custom flag before llama arg parsing and initialization ---
-    std::string result_path = "measurements_top_view.csv";
+    std::string result_path = "";
     std::vector<std::string> event_names = extract_args(argc, argv, result_path);
+
+    if(result_path.empty()){
+        fprintf(stderr, "No given result path");
+        return 1;
+    }
 
     // PAPI init 
     if (PAPI_library_init(PAPI_VER_CURRENT) != PAPI_VER_CURRENT) {
@@ -249,11 +379,6 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    //Create PAPI value vectors for each phase 
-    std::vector<long long> papi_values_tokenizing(n_events, 0);
-    std::vector<long long> papi_values_prefill(n_events, 0);
-    std::vector<long long> papi_values_decode(n_events, 0);
-    std::vector<long long> papi_values_sampling(n_events, 0);
 
     if (PAPI_create_eventset(&papi_event_set) != PAPI_OK) {
         fprintf(stderr, "PAPI create eventset error!\n");
@@ -275,12 +400,14 @@ int main(int argc, char ** argv) {
         printf("PAPI: added event %s\n", name.c_str());
     }
 
+    /*
     // --- Open CSV and write dynamic header ---
     FILE * out_file = fopen(result_path.c_str(), "w");
     if (!out_file) {
         fprintf(stderr, "Failed to open %s!\n", result_path.c_str());
         return 1;
     }
+    */
 
     // --- Standard llama arg parsing and initialization ---
     common_params params;
@@ -321,25 +448,16 @@ int main(int argc, char ** argv) {
 
     ///////// MEASUREMENTS HOLDERS //////////////////
 
-    int n_logical = std::thread::hardware_concurrency();
-    std::map<int, std::vector<int>> core_map = get_physical_core_map();
+    perf_energy energy  = energy_init();
+    int n_logical       = std::thread::hardware_concurrency();
 
-    //Tokenization
-    std::vector<CoreStat> before_tokenization(n_logical), after_tokenization(n_logical);
-    std::vector<CoreStat> accum_tokenization(n_logical, {0,0,0,0,0,0,0});
-    int64_t time_spent_tokenizing = 0;
-    //Sampling
-    std::vector<CoreStat> before_sampling(n_logical), after_sampling(n_logical);
-    std::vector<CoreStat> accum_sampling(n_logical, {0,0,0,0,0,0,0});
-    int64_t time_spent_sampling = 0;
-    //Prefill
-    std::vector<CoreStat> before_prefill(n_logical), after_prefill(n_logical);
-    std::vector<CoreStat> accum_prefill(n_logical, {0,0,0,0,0,0,0});
-    int64_t time_spent_prefill = 0;
-    //Decode
-    std::vector<CoreStat> before_decode(n_logical), after_decode(n_logical);
-    std::vector<CoreStat> accum_decode(n_logical, {0,0,0,0,0,0,0});
-    int64_t time_spent_decode = 0;
+    Run_Metrics metrics;
+    metrics.tokenization = { "tokenization", 0, std::vector<long long>(n_events, 0), std::vector<CoreStat>(n_logical, {0,0,0,0,0,0,0}), {} };
+    metrics.sampling     = { "sampling",     0, std::vector<long long>(n_events, 0), std::vector<CoreStat>(n_logical, {0,0,0,0,0,0,0}), {} };
+    metrics.prefill      = { "prefill",      0, std::vector<long long>(n_events, 0), std::vector<CoreStat>(n_logical, {0,0,0,0,0,0,0}), {} };
+    metrics.decode       = { "decode",       0, std::vector<long long>(n_events, 0), std::vector<CoreStat>(n_logical, {0,0,0,0,0,0,0}), {} };
+
+    std::vector<CoreStat> before(n_logical), after(n_logical);
 
     /////////////////////////////////////////////////
 
@@ -380,11 +498,11 @@ int main(int argc, char ** argv) {
         
         //////// TOKENIZATION MEASUREMENTS START HERE /////////////
 
-        
-        for (int c = 0; c < n_logical; c++) before_tokenization[c] = read_core_stat(c);
-        int64_t tokenization_start = now_ns();
+        for (int c = 0; c < n_logical; c++) before[c] = read_core_stat(c);
+        int64_t t_start = now_ns();
+        energy_reset(energy);
         PAPI_start(papi_event_set);
-
+        
         ///////////////////////////////////////////////////////////
 
 
@@ -410,10 +528,13 @@ int main(int argc, char ** argv) {
         }
 
         //////// TOKENIZATION MEASUREMENTS ENDS HERE /////////////
-        PAPI_stop(papi_event_set, papi_values_tokenizing.data());
-        time_spent_tokenizing += now_ns() - tokenization_start;
-        for (int c = 0; c < n_logical; c++) after_tokenization[c] = read_core_stat(c);
-        accumulate_core_stats(accum_tokenization, before_tokenization, after_tokenization, n_logical);
+
+        PAPI_stop(papi_event_set, metrics.tokenization.papi_values.data());
+        metrics.tokenization.runtime_ns += now_ns() - t_start;
+        for (int i = 0; i < N_DOMAINS; i++) metrics.tokenization.energy_accum[i] += energy_read(energy, i);
+        for (int c = 0; c < n_logical; c++) after[c] = read_core_stat(c);
+        accumulate_core_stats(metrics.tokenization.core_accum, before, after, n_logical);
+        
 
         ///////////////////////////////////////////////////////////
 
@@ -422,8 +543,9 @@ int main(int argc, char ** argv) {
 
 
         //////// PREFILL MEASUREMENTS STARTS HERE /////////////
-        for (int c = 0; c < n_logical; c++) before_prefill[c] = read_core_stat(c);
+        for (int c = 0; c < n_logical; c++) before[c] = read_core_stat(c);
         int64_t prefill_start = now_ns();
+        energy_reset(energy);
         PAPI_start(papi_event_set);
         ///////////////////////////////////////////////////////////
 
@@ -433,10 +555,11 @@ int main(int argc, char ** argv) {
         }
 
         //////// PREFILL MEASUREMENTS ENDS HERE /////////////
-        PAPI_stop(papi_event_set, papi_values_prefill.data());
-        time_spent_prefill += now_ns() - prefill_start;
-        for (int c = 0; c < n_logical; c++) after_prefill[c] = read_core_stat(c);
-        accumulate_core_stats(accum_prefill, before_prefill, after_prefill, n_logical);
+        PAPI_stop(papi_event_set, metrics.prefill.papi_values.data());
+        metrics.prefill.runtime_ns += now_ns() - prefill_start;
+        for (int i = 0; i < N_DOMAINS; i++) metrics.prefill.energy_accum[i] += energy_read(energy, i);
+        for (int c = 0; c < n_logical; c++) after[c] = read_core_stat(c);
+        accumulate_core_stats(metrics.prefill.core_accum, before, after, n_logical);
         ///////////////////////////////////////////////////////////
 
         printf("User input processed.\n");
@@ -452,8 +575,9 @@ int main(int argc, char ** argv) {
             // PHASE 3: Sampling ----------------------------------------
 
             //////// SAMPLING MEASUREMENTS STARTS HERE //////////////////
-            for (int c = 0; c < n_logical; c++) before_sampling[c] = read_core_stat(c);
+            for (int c = 0; c < n_logical; c++) before[c] = read_core_stat(c);
             int64_t sampling_start = now_ns();
+            energy_reset(energy);
             PAPI_start(papi_event_set);
             /////////////////////////////////////////////////////////////
 
@@ -464,12 +588,12 @@ int main(int argc, char ** argv) {
 
             if (llama_vocab_is_eog(vocab, new_token)) break; //Check if end of generation token
 
-            //////// SAMPLING MEASUREMENTS ENDSHERE /////////////////////
-
-            PAPI_stop(papi_event_set, papi_values_sampling.data());
-            time_spent_sampling += now_ns() - sampling_start;
-            for (int c = 0; c < n_logical; c++) after_sampling[c] = read_core_stat(c);
-            accumulate_core_stats(accum_sampling, before_sampling, after_sampling, n_logical);
+            //////// SAMPLING MEASUREMENTS ENDS HERE /////////////////////
+            PAPI_stop(papi_event_set, metrics.sampling.papi_values.data());
+            metrics.sampling.runtime_ns += now_ns() - sampling_start;
+            for (int i = 0; i < N_DOMAINS; i++) metrics.sampling.energy_accum[i] += energy_read(energy, i);
+            for (int c = 0; c < n_logical; c++) after[c] = read_core_stat(c);
+            accumulate_core_stats(metrics.sampling.core_accum, before, after, n_logical);
             /////////////////////////////////////////////////////////////
 
             printf("%s", piece.c_str());
@@ -486,10 +610,10 @@ int main(int argc, char ** argv) {
             // PHASE 4: Decode ------------------------------------------
 
             //////// DECODE MEASUREMENTS STARTS HERE //////////////////
-            for (int c = 0; c < n_logical; c++) before_decode[c] = read_core_stat(c);
+            for (int c = 0; c < n_logical; c++) before[c] = read_core_stat(c);
             int64_t decode_start = now_ns();
+            energy_reset(energy);
             PAPI_start(papi_event_set);
-
             /////////////////////////////////////////////////////////////
 
 
@@ -499,11 +623,11 @@ int main(int argc, char ** argv) {
             }
 
             //////// DECODE MEASUREMENTS ENDS HERE /////////////////////
-
-            PAPI_stop(papi_event_set, papi_values_decode.data());
-            time_spent_decode += now_ns() - decode_start;
-            for (int c = 0; c < n_logical; c++) after_decode[c] = read_core_stat(c);
-            accumulate_core_stats(accum_decode, before_decode, after_decode, n_logical);
+            PAPI_stop(papi_event_set, metrics.decode.papi_values.data());
+            metrics.decode.runtime_ns += now_ns() - decode_start;
+            for (int i = 0; i < N_DOMAINS; i++) metrics.decode.energy_accum[i] += energy_read(energy, i);
+            for (int c = 0; c < n_logical; c++) after[c] = read_core_stat(c);
+            accumulate_core_stats(metrics.decode.core_accum, before, after, n_logical);
             /////////////////////////////////////////////////////////////
             
             n_pos++;
@@ -535,28 +659,11 @@ int main(int argc, char ** argv) {
 
     printf("\n--- Conversation ended ---\n");
 
-    // Write results to CSV in top-view format
-    fprintf(out_file, "PHASE_VIEW\n");
-    fprintf(out_file, "--------------- TOKENIZATION ---------------\n");
-    fprintf(out_file, "Time spent: %ld ns\n", time_spent_tokenizing);
-    write_papi_values(out_file, event_names, papi_values_tokenizing);
-    write_core_utils(out_file, accum_tokenization);
-    fprintf(out_file, "--------------- SAMPLING -------------------\n");
-    fprintf(out_file, "Time spent: %ld ns\n", time_spent_sampling);
-    write_papi_values(out_file, event_names, papi_values_sampling);
-    write_core_utils(out_file, accum_sampling);
-    fprintf(out_file, "--------------- PREFILL --------------------\n");
-    fprintf(out_file, "Time spent: %ld ns\n", time_spent_prefill);
-    write_papi_values(out_file, event_names, papi_values_prefill);
-    write_core_utils(out_file, accum_prefill);
-    fprintf(out_file, "--------------- DECODE ---------------------\n");
-    fprintf(out_file, "Time spent: %ld ns\n", time_spent_decode);
-    write_papi_values(out_file, event_names, papi_values_decode);
-    write_core_utils(out_file, accum_decode);
+    // Write all metrics to JSON, merging with existing file if present
+    write_metrics_to_json(result_path, metrics, event_names, energy);
 
     // Clean up
     common_sampler_free(smpl);
-    fclose(out_file);
     PAPI_destroy_eventset(&papi_event_set);
     PAPI_shutdown();
     llama_backend_free();

@@ -32,6 +32,7 @@ def select_run_type():
         "5": ("conversation", "Conversation mode with PAPI events"),
         "6": ("TOP-VIEW", "Run TOP-VIEW measurements with PAPI events (experimental)"),
         "7": ("PHASE-VIEW", "Run PHASE-VIEW measurements with PAPI events (experimental)"),
+        "8": ("DECODER-BLOCK-VIEW", "Run DECODER-BLOCK-VIEW measurements with PAPI events (experimental)")
     }
 
     print("\nSelect run type:")
@@ -41,7 +42,7 @@ def select_run_type():
     while True:
         raw = input("> ").strip()
         if raw not in run_types:
-            print("Invalid choice. Enter 1, 2, 3, 4, 5, or 6.")
+            print("Invalid choice. Enter 1, 2, 3, 4, 5, 6, 7, or 8.")
             continue
 
         key, desc = run_types[raw]
@@ -226,7 +227,7 @@ def run_top_view_papi(model_path, events, prompt, n_predict, k_cache_type, v_cac
     cmd = [
         binary_path,
         "--papi-events", events_arg,
-        "--result-path", "top_view_measurements.csv",
+        "--result-path", "top_view_measurements.json",
         "--conversation",  # Enable conversation mode for TOP-VIEW
         "-m", model_path,
         "-p", prompt,
@@ -251,7 +252,7 @@ def run_phase_view_papi(model_path, events, prompt, n_predict, binary_path):
     cmd = [
         binary_path,
         "--papi-events", events_arg,
-        "--result-path", "phase_view_measurements.csv",
+        "--result-path", "phase_view_measurements.json",
         "--conversation",  # Enable conversation mode for PHASE-VIEW
         "-m", model_path,
         "-p", prompt,
@@ -266,6 +267,31 @@ def run_phase_view_papi(model_path, events, prompt, n_predict, binary_path):
 
     # Run interactively so user can input multiple turns
     subprocess.run(cmd, cwd=LLAMA_ROOT)
+
+def run_decoder_block_view_papi(model_path, events, prompt, n_predict, binary_path):
+    event_names = [e[0] for e in events]
+    events_arg = ",".join(event_names)
+    result_path = os.path.abspath("../decoder_block_view_measurements.json")
+
+    cmd = [
+        binary_path,
+        "--papi-events", events_arg,
+        "--result-path", result_path,
+        "--conversation",  # Enable conversation mode for DECODER-BLOCK-VIEW
+        "-m", model_path,
+        "-p", prompt,
+        "-n", str(n_predict),
+        "--temp", "0",  # fixed temp for consistent measurements
+        "--log-disable",
+    ]
+
+    print(f"\nStarting DECODER-BLOCK-VIEW measurement with PAPI events...")
+    print(f"Running: {' '.join(cmd)}\n")
+    print("You can type 'quit' or 'exit' to end the conversation.\n")
+
+    # Run interactively so user can input multiple turns
+    subprocess.run(cmd, cwd=LLAMA_ROOT)
+
 
 
 #Used for running kv-measure
@@ -448,6 +474,8 @@ def main():
         binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-top-view")
     elif run_type == "PHASE-VIEW":
         binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-phase-view")
+    elif run_type == "DECODER-BLOCK-VIEW":
+        binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-decoder-block-view")
 
     # Check if the selected binary exists
     if(not check_binary(binary_path)):
@@ -459,7 +487,7 @@ def main():
 
     #If single batch with PAPI events or conversation mode, allow event selection. Otherwise skip to prompt input.
     events = []
-    if run_type == "single" or run_type == "conversation" or run_type == "TOP-VIEW" or run_type == "PHASE-VIEW":
+    if run_type == "single" or run_type == "conversation" or run_type == "TOP-VIEW" or run_type == "PHASE-VIEW" or run_type == "DECODER-BLOCK-VIEW":
         events = select_events()
 
     #If KV cache measurement, detect cache type from model name. Otherwise skip to prompt input.
@@ -493,6 +521,8 @@ def main():
         run_top_view_papi(model_path, events, prompt, n_predict, k_cache_type, v_cache_type, binary_path)
     elif run_type == "PHASE-VIEW":
         run_phase_view_papi(model_path, events, prompt, n_predict, binary_path)
+    elif run_type == "DECODER-BLOCK-VIEW":
+        run_decoder_block_view_papi(model_path, events, prompt, n_predict, binary_path)
 
 
 if __name__ == "__main__":

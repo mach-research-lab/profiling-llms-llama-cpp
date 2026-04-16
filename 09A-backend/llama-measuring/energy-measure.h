@@ -1,3 +1,11 @@
+/*
+Helper functions for measuring energy usage via Linux's perf subsystem. 
+This is a bit more complex than the CPU time measurement, but it allows
+you to get actual energy usage in microjoules for the CPU package, CPU cores, and full system
+(if supported by your hardware).
+*/
+
+
 #pragma once
 
 #include <cstdint>
