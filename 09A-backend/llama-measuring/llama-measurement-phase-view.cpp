@@ -13,7 +13,7 @@
 #include <time.h>
 #include <papi.h>
 #include <thread>
-#include "energy-measure.h"
+#include "utils.h"
 #include <nlohmann/json.hpp> //Already inlcuded in llama.cpp
 #include <fstream>
 
@@ -34,137 +34,6 @@
 bool unrestricted_events_supported = false;
 bool conversation_mode = false;
 
-// --- MEASUREMENT FUNCTIONS ---
-
-// Helper to get current time in nanoseconds for high-resolution timing
-static inline int64_t now_ns() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-}
-
-// Helper to get current RSS memory usage in KB by reading /proc/self/status
-static inline int64_t get_peak_rss_kb() {
-    FILE* f = fopen("/proc/self/status", "r");
-    char line[128];
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "VmPeak:", 7) == 0) {
-            long kb;
-            sscanf(line + 7, "%ld", &kb);
-            fclose(f);
-            return kb;
-        }
-    }
-    fclose(f);
-    return -1;
-}
-
-struct CoreStat {
-    long long user, nice, system, idle, iowait, irq, softirq;
-};
-
-// Helper to read CPU core stats for utilization calculation
-CoreStat read_core_stat(int core_id) {
-    FILE* f = fopen("/proc/stat", "r");
-    char line[256];
-    CoreStat s = {};
-    while (fgets(line, sizeof(line), f)) {
-        char label[16];
-        // Lines look like: "cpu0 1234 56 789 ..."
-        if (sscanf(line, "%s", label) == 1) {
-            std::string target = "cpu" + std::to_string(core_id);
-            if (std::string(label) == target) {
-                sscanf(line, "%*s %lld %lld %lld %lld %lld %lld %lld",
-                    &s.user, &s.nice, &s.system, &s.idle,
-                    &s.iowait, &s.irq, &s.softirq);
-                break;
-            }
-        }
-    }
-    fclose(f);
-    return s;
-}
-
-// Helper to calculate CPU core utilization percentage between two CoreStat snapshots
-double core_utilization(const CoreStat& before, const CoreStat& after) {
-    long long idle_delta  = (after.idle + after.iowait) - (before.idle + before.iowait);
-    long long total_delta = (after.user + after.nice + after.system + after.idle +
-                             after.iowait + after.irq + after.softirq) -
-                            (before.user + before.nice + before.system + before.idle +
-                             before.iowait + before.irq + before.softirq);
-    if (total_delta == 0) return 0.0;
-    return 100.0 * (1.0 - (double)idle_delta / total_delta);
-}
-
-// Helper to accumulate core stats deltas into an accumulator vector for averaging later
-void accumulate_core_stats(std::vector<CoreStat>& accum,
-                           const std::vector<CoreStat>& before,
-                           const std::vector<CoreStat>& after,
-                           int n_logical) {
-    for (int c = 0; c < n_logical; c++) {
-        accum[c].user    += after[c].user    - before[c].user;
-        accum[c].nice    += after[c].nice    - before[c].nice;
-        accum[c].system  += after[c].system  - before[c].system;
-        accum[c].idle    += after[c].idle    - before[c].idle;
-        accum[c].iowait  += after[c].iowait  - before[c].iowait;
-        accum[c].irq     += after[c].irq     - before[c].irq;
-        accum[c].softirq += after[c].softirq - before[c].softirq;
-    }
-}
-
-// Returns a map of physical_core_id -> list of logical CPU ids
-std::map<int, std::vector<int>> get_physical_core_map() {
-    std::map<int, std::vector<int>> core_map;
-    int logical = std::thread::hardware_concurrency();
-
-    for (int i = 0; i < logical; i++) {
-        char path[128];
-        snprintf(path, sizeof(path),
-            "/sys/devices/system/cpu/cpu%d/topology/core_id", i);
-        FILE* f = fopen(path, "r");
-        if (f) {
-            int core_id;
-            if (fscanf(f, "%d", &core_id) == 1) {
-                core_map[core_id].push_back(i);
-            }
-            fclose(f);
-        }
-    }
-    return core_map;
-}
-
-
-struct CPUTopology {
-    int logical_id;
-    int core_id;
-    int socket_id;
-};
-
-std::vector<CPUTopology> get_full_topology() {
-    std::vector<CPUTopology> topology;
-    int n_logical = std::thread::hardware_concurrency();
-    for (int i = 0; i < n_logical; i++) {
-        CPUTopology t;
-        t.logical_id = i;
-        char path[256];
-        snprintf(path, sizeof(path),
-            "/sys/devices/system/cpu/cpu%d/topology/core_id", i);
-        FILE* f = fopen(path, "r");
-        if (f) { 
-            if(fscanf(f, "%d", &t.core_id) != 1) t.core_id = -1; // Fallback if parsing fails
-            fclose(f); 
-        }
-        snprintf(path, sizeof(path),
-            "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", i);
-        f = fopen(path, "r");
-        if (f) { 
-            if(fscanf(f, "%d", &t.socket_id) != 1) t.socket_id = -1; // Fallback if parsing fails
-            fclose(f); 
-        }
-        topology.push_back(t);
-    }
-    return topology;
-}
 
 struct Phase_Metrics {
     std::string phase_name;
@@ -270,49 +139,18 @@ void write_metrics_to_json(const std::string& result_path,
     out << j.dump(2);
 }
 
-// --- ARGUMENT PARSING ---
-
-// Parse --papi-events from argv before passing the rest to llama's parser.
-// Removes our custom flag so llama's parser doesn't choke on it.
-static std::vector<std::string> extract_args(int & argc, char ** argv, std::string & result_path) {
-    std::vector<std::string> events;
-    int write_idx = 1; // argv[0] stays
-
-    for (int i = 1; i < argc; i++) {
-        if (std::strcmp(argv[i], "--papi-events") == 0 && i + 1 < argc) {
-            std::string arg(argv[i + 1]);
-            size_t start = 0;
-            while (start < arg.size()) {
-                size_t end = arg.find(',', start);
-                if (end == std::string::npos) end = arg.size();
-                std::string name = arg.substr(start, end - start);
-                if (!name.empty()) events.push_back(name);
-                start = end + 1;
-            }
-            i++; // skip the value
-        } else if (std::strcmp(argv[i], "--result-path") == 0 && i + 1 < argc) {
-            result_path = argv[i + 1];
-            i++; // skip the value
-        } else if (std::strcmp(argv[i], "--papi-events-unrestricted") == 0) {
-            unrestricted_events_supported = true;
-        } else if (std::strcmp(argv[i], "--conversation") == 0) {
-            conversation_mode = true;
-        } else {
-            argv[write_idx++] = argv[i]; // only forward unrecognized args
-        }
-
-    }
-    argc = write_idx;
-    return events;
-}
 
 // --- MAIN FUNCTION ---
 
 int main(int argc, char ** argv) {
 
     // --- Extract our custom flag before llama arg parsing and initialization ---
-    std::string result_path = "";
-    std::vector<std::string> event_names = extract_args(argc, argv, result_path);
+    Parsed_Args custom_args = extract_args(argc, argv);
+    
+    std::string result_path              = custom_args.result_path;
+    std::vector<std::string> event_names = custom_args.events;
+    unrestricted_events_supported        = custom_args.unrestricted_events_supported;
+    conversation_mode                    = custom_args.conversation_mode;
 
     if(result_path.empty()){
         fprintf(stderr, "No given result path");

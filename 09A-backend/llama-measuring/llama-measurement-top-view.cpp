@@ -10,7 +10,7 @@
 #include <cstring>
 #include <time.h>
 #include <papi.h>
-#include "energy-measure.h"
+#include "utils.h"
 #include <nlohmann/json.hpp> //Already inlcuded in llama.cpp
 #include <fstream>
 
@@ -41,47 +41,9 @@
 
 */
 
-
 // Used for multibatched runs to keep down amount of runs needed
 bool unrestricted_events_supported = false;
 bool conversation_mode = false;
-
-// --- MEASUREMENT FUNCTIONS ---
-
-// Helper to get current time in nanoseconds for high-resolution timing
-static inline int64_t now_ns() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-}
-
-// Helper to get current RSS memory usage in KB by reading /proc/self/status
-static inline int64_t get_peak_rss_kb() {
-    FILE* f = fopen("/proc/self/status", "r");
-    char line[128];
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "VmPeak:", 7) == 0) {
-            long kb;
-            sscanf(line + 7, "%ld", &kb);
-            fclose(f);
-            return kb;
-        }
-    }
-    fclose(f);
-    return -1;
-}
-
-// Helper to get average CPU usage percentage over a short interval by reading /proc/stat
-static inline int64_t get_cpu_time_ns() {
-    FILE* f = fopen("/proc/self/stat", "r");
-    if (!f) return -1;
-    long utime, stime;
-    int ret = fscanf(f, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %ld %ld", &utime, &stime);
-    fclose(f);
-    if (ret != 2) return -1;
-    long ticks_per_sec = sysconf(_SC_CLK_TCK);
-    return (utime + stime) * (1000000000L / ticks_per_sec);
-}
 
 // --- JSON helpers ---
 
@@ -103,51 +65,17 @@ void write_energy_accum_json(nlohmann::json& json_file, const perf_energy & e, c
 }
 
 
-
-// --- ARGUMENT PARSING ---
-
-// Parse --papi-events from argv before passing the rest to llama's parser.
-// Removes our custom flag so llama's parser doesn't choke on it.
-static std::vector<std::string> extract_args(int & argc, char ** argv, std::string & result_path) {
-    std::vector<std::string> events;
-    int write_idx = 1; // argv[0] stays
-
-    for (int i = 1; i < argc; i++) {
-        if (std::strcmp(argv[i], "--papi-events") == 0 && i + 1 < argc) {
-            std::string arg(argv[i + 1]);
-            size_t start = 0;
-            while (start < arg.size()) {
-                size_t end = arg.find(',', start);
-                if (end == std::string::npos) end = arg.size();
-                std::string name = arg.substr(start, end - start);
-                if (!name.empty()) events.push_back(name);
-                start = end + 1;
-            }
-            i++; // skip the value
-        } else if (std::strcmp(argv[i], "--result-path") == 0 && i + 1 < argc) {
-            result_path = argv[i + 1];
-            i++; // skip the value
-        } else if (std::strcmp(argv[i], "--papi-events-unrestricted") == 0) {
-            unrestricted_events_supported = true;
-        } else if (std::strcmp(argv[i], "--conversation") == 0) {
-            conversation_mode = true;
-        } else {
-            argv[write_idx++] = argv[i]; // only forward unrecognized args
-        }
-
-    }
-    argc = write_idx;
-    return events;
-}
-
-
 // --- MAIN FUNCTION ---
 
 int main(int argc, char ** argv) {
 
     // --- Extract our custom flag before llama arg parsing and initialization ---
-    std::string result_path = "";
-    std::vector<std::string> event_names = extract_args(argc, argv, result_path);
+    Parsed_Args custom_args = extract_args(argc, argv);
+    
+    std::string result_path              = custom_args.result_path;
+    std::vector<std::string> event_names = custom_args.events;
+    unrestricted_events_supported        = custom_args.unrestricted_events_supported;
+    conversation_mode                    = custom_args.conversation_mode;
 
     if(result_path.empty()){
         fprintf(stderr, "No given result path");

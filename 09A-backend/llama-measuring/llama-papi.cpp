@@ -2,8 +2,8 @@
 #include "common.h"
 #include "log.h"
 #include "llama.h"
-#include "llama-cpp.h"
 #include "sampling.h"
+#include "utils.h"
 #include <string>
 #include <vector>
 #include <iostream>
@@ -12,8 +12,6 @@
 #include <time.h>
 #include <papi.h>
 #include <sqlite3.h>
-#include <sstream>
-#include <string_view>
 
 #define MAX_PAPI_EVENTS 4
 
@@ -21,13 +19,6 @@
 bool unrestricted_events_supported = false;
 bool conversation_mode = false;
 bool use_database = false;  // Flag to enable/disable database storage
-
-
-static inline int64_t now_ns() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-}
 
 struct event_record {
     int event_item_id;
@@ -244,47 +235,6 @@ static void batch_insert_to_database(sqlite3* db_conn, const std::vector<event_r
     }
 }
 
-// Parse --papi-events from argv before passing the rest to llama's parser.
-// Removes our custom flag so llama's parser doesn't choke on it.
-static std::vector<std::string> extract_papi_args(int & argc, char ** argv, std::string & result_path, std::string & db_path) {
-    std::vector<std::string> events;
-    int write_idx = 1; // argv[0] stays
-
-    for (int i = 1; i < argc; i++) {
-        if (std::strcmp(argv[i], "--papi-events") == 0 && i + 1 < argc) {
-            std::string arg(argv[i + 1]);
-            size_t start = 0;
-            while (start < arg.size()) {
-                size_t end = arg.find(',', start);
-                if (end == std::string::npos) end = arg.size();
-                std::string name = arg.substr(start, end - start);
-                if (!name.empty()) events.push_back(name);
-                start = end + 1;
-            }
-            i++; // skip the value
-        } else if (std::strcmp(argv[i], "--result-path") == 0 && i + 1 < argc) {
-            result_path = argv[i + 1];
-            i++; // skip the value
-        } else if (std::strcmp(argv[i], "--db-path") == 0 && i + 1 < argc) {
-            db_path = argv[i + 1];
-            i++; // skip the value
-        } else if (std::strcmp(argv[i], "--use-db") == 0) {
-            use_database = true;
-        } else if (std::strcmp(argv[i], "--papi-events-unrestricted") == 0) {
-            unrestricted_events_supported = true;
-        } else if (std::strcmp(argv[i], "--conversation") == 0) {
-            conversation_mode = true;
-        } else {
-            argv[write_idx++] = argv[i]; // only forward unrecognized args
-        }
-
-    }
-    argc = write_idx;
-    return events;
-}
-
-
-
 static void write_zero_counters(FILE * f, int n_events) {
     for (int i = 0; i < n_events; i++) {
         fprintf(f, ",0");
@@ -295,9 +245,14 @@ static void write_zero_counters(FILE * f, int n_events) {
 int main(int argc, char ** argv) {
 
     // --- Extract our custom flag before llama arg parsing ---
-    std::string result_path = "measurements.csv";
-    std::string db_path = "profiling_data.db";
-    std::vector<std::string> event_names = extract_papi_args(argc, argv, result_path, db_path);
+    Parsed_Args custom_args = extract_args(argc, argv);
+    
+    std::string result_path              = custom_args.result_path;
+    std::vector<std::string> event_names = custom_args.events;
+    std::string db_path                  = custom_args.db_path;
+    use_database                         = custom_args.use_database;
+    unrestricted_events_supported        = custom_args.unrestricted_events_supported;
+    conversation_mode                    = custom_args.conversation_mode;
 
     if (event_names.empty()) {
         fprintf(stderr, "Error: no PAPI events specified.\n");
