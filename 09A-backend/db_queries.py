@@ -224,8 +224,23 @@ def get_time_per_token(
     """
     Total time (µs) spent per token index for a run.
     Useful for plotting latency over the decode sequence.
+
+    Returns event_token_index (raw encoded value) alongside token_position,
+    which is the sequential position within the phase. Decode tokens use the
+    encoding turn*1000+i+1, so token_position = idx % 1000 strips the turn
+    prefix and gives a 1-based position within the decode sequence.
     """
-    sql = "SELECT event_token_index, SUM(event_time_microseconds) AS total_time_us FROM event_item WHERE run_id = ?"
+    sql = """
+        SELECT
+            event_token_index,
+            CASE WHEN event_token_index >= 1000
+                 THEN event_token_index % 1000
+                 ELSE event_token_index
+            END AS token_position,
+            SUM(event_time_microseconds) AS total_time_us
+        FROM event_item
+        WHERE run_id = ?
+    """
     params: list = [run_id]
     if phase is not None:
         sql += " AND event_phase = ?"
@@ -242,8 +257,13 @@ def get_operation_time_per_token(
 ) -> list[dict]:
     """Total time (µs) for a specific operation type per token index."""
     sql = """
-        SELECT event_token_index,
-               SUM(event_time_microseconds) AS total_time_us
+        SELECT
+            event_token_index,
+            CASE WHEN event_token_index >= 1000
+                 THEN event_token_index % 1000
+                 ELSE event_token_index
+            END AS token_position,
+            SUM(event_time_microseconds) AS total_time_us
         FROM event_item
         WHERE run_id = ? AND event_operation_type = ?
     """
@@ -526,8 +546,13 @@ def get_papi_per_token(
 ) -> list[dict]:
     """Total of a PAPI counter per token index for a run — mirrors get_time_per_token."""
     sql = """
-        SELECT e.event_token_index,
-               SUM(p.papi_value) AS total_papi_value
+        SELECT
+            e.event_token_index,
+            CASE WHEN e.event_token_index >= 1000
+                 THEN e.event_token_index % 1000
+                 ELSE e.event_token_index
+            END AS token_position,
+            SUM(p.papi_value) AS total_papi_value
         FROM event_item e
         JOIN event_papi_counter p ON e.event_item_id = p.event_item_id
         WHERE p.papi_event_name = ? AND e.run_id = ?
