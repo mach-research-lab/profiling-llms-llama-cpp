@@ -13,7 +13,6 @@
 #include <papi.h>
 #include <sqlite3.h>
 #include <sstream>
-#include <string_view>
 
 #define MAX_PAPI_EVENTS 4
 
@@ -22,13 +21,7 @@ bool unrestricted_events_supported = false;
 bool conversation_mode = false;
 bool use_database = false;  // Flag to enable/disable database storage
 
-
-static inline int64_t now_ns() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-}
-
+// --- DATABASE FUNCTIONALITY ---
 struct event_record {
     int event_item_id;
     int64_t run_id;
@@ -41,80 +34,6 @@ struct event_record {
     int64_t n_elements;
     std::vector<long long> papi_values;
 };
-
-struct callback_data {
-    int64_t                       t_start;
-    FILE                        * out_file;
-    int                           papi_event_set;
-    int                           token_index;
-    const char                  * phase;
-    int                           n_events;
-    sqlite3                     * db_conn;
-    std::vector<std::string>    * event_names;
-    int                           event_item_id_counter;
-    std::vector<event_record>   * pending_records;
-    int64_t                       run_id;
-};
-
-static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
-    auto * data = (callback_data *) user_data;
-
-    if (ask) {
-        data->t_start = now_ns();
-        PAPI_start(data->papi_event_set);
-        return true;
-    }
-
-    if (t->name[0] == '\0') return true;
-
-    int papi_values_length = MAX_PAPI_EVENTS;
-
-    if(unrestricted_events_supported) {
-        papi_values_length = data->n_events;
-    }
-
-    std::vector<long long> papi_values(papi_values_length, 0);
-    PAPI_stop(data->papi_event_set, papi_values.data());
-
-    int64_t      duration_ns = now_ns() - data->t_start;
-    size_t       tensor_size = ggml_nbytes(t);
-    int64_t      n_elements  = ggml_nelements(t);
-    const char * op_name     = ggml_op_name(t->op);
-
-    // Write to CSV file
-    fprintf(data->out_file, "%s,%d,%s,%s,%ld,%zu,%ld",
-        data->phase,
-        data->token_index,
-        t->name,
-        op_name,
-        duration_ns,
-        tensor_size,
-        n_elements
-    );
-    for (int i = 0; i < data->n_events; i++) {
-        fprintf(data->out_file, ",%lld", papi_values[i]);
-    }
-    fprintf(data->out_file, "\n");
-
-    // Accumulate record for later batch insertion into SQLite
-    if (use_database && data->db_conn != nullptr && data->pending_records != nullptr) {
-        event_record record;
-        record.event_item_id = data->event_item_id_counter++;
-        record.run_id = data->run_id;
-        record.phase = data->phase;
-        record.token_index = data->token_index;
-        record.tensor_name = t->name;
-        record.op_name = op_name;
-        record.duration_us = duration_ns / 1000;  // Convert to microseconds
-        record.tensor_size = tensor_size;
-        record.n_elements = n_elements;
-        record.papi_values = papi_values;
-
-        data->pending_records->push_back(record);
-    }
-
-    return true;
-}
 
 // Initialize SQLite database schema
 static bool init_sqlite_schema(sqlite3* db) {
@@ -193,7 +112,6 @@ static void batch_insert_to_database(sqlite3* db_conn, const std::vector<event_r
 
     // Insert all records using prepared statements
     for (const auto& record : records) {
-        // Bind event_item parameters
         sqlite3_bind_int64(event_stmt, 1, record.event_item_id);
         sqlite3_bind_int64(event_stmt, 2, record.run_id);
         sqlite3_bind_text(event_stmt, 3, record.phase.c_str(), -1, SQLITE_TRANSIENT);
@@ -230,7 +148,6 @@ static void batch_insert_to_database(sqlite3* db_conn, const std::vector<event_r
         }
     }
 
-    // Clean up prepared statements
     sqlite3_finalize(event_stmt);
     sqlite3_finalize(papi_stmt);
 
@@ -244,9 +161,49 @@ static void batch_insert_to_database(sqlite3* db_conn, const std::vector<event_r
     }
 }
 
+// --- MEASUREMENT FUNCTIONS ---
+
+// Helper to get current time in nanoseconds for high-resolution timing
+static inline int64_t now_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+// Helper to get current RSS memory usage in KB by reading /proc/self/status
+static inline int64_t get_peak_rss_kb() {
+    FILE* f = fopen("/proc/self/status", "r");
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "VmPeak:", 7) == 0) {
+            long kb;
+            sscanf(line + 7, "%ld", &kb);
+            fclose(f);
+            return kb;
+        }
+    }
+    fclose(f);
+    return -1;
+}
+
+// Helper to get average CPU usage percentage over a short interval by reading /proc/stat
+static inline int64_t get_cpu_time_ns() {
+    FILE* f = fopen("/proc/self/stat", "r");
+    if (!f) return -1;
+    long utime, stime;
+    int ret = fscanf(f, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %ld %ld", &utime, &stime);
+    fclose(f);
+    if (ret != 2) return -1;
+    long ticks_per_sec = sysconf(_SC_CLK_TCK);
+    return (utime + stime) * (1000000000L / ticks_per_sec);
+}
+
+
+// --- ARGUMENT PARSING ---
+
 // Parse --papi-events from argv before passing the rest to llama's parser.
 // Removes our custom flag so llama's parser doesn't choke on it.
-static std::vector<std::string> extract_papi_args(int & argc, char ** argv, std::string & result_path, std::string & db_path) {
+static std::vector<std::string> extract_args(int & argc, char ** argv, std::string & result_path, std::string & db_path) {
     std::vector<std::string> events;
     int write_idx = 1; // argv[0] stays
 
@@ -284,20 +241,23 @@ static std::vector<std::string> extract_papi_args(int & argc, char ** argv, std:
 }
 
 
-
-static void write_zero_counters(FILE * f, int n_events) {
-    for (int i = 0; i < n_events; i++) {
-        fprintf(f, ",0");
-    }
-    fprintf(f, "\n");
-}
+// --- MAIN FUNCTION ---
 
 int main(int argc, char ** argv) {
 
-    // --- Extract our custom flag before llama arg parsing ---
-    std::string result_path = "measurements.csv";
+    // --- Extract our custom flags before llama arg parsing ---
+    std::string result_path = "measurements_top_view.csv";
     std::string db_path = "profiling_data.db";
-    std::vector<std::string> event_names = extract_papi_args(argc, argv, result_path, db_path);
+    std::vector<std::string> event_names = extract_args(argc, argv, result_path, db_path);
+
+    // PAPI init
+    if (PAPI_library_init(PAPI_VER_CURRENT) != PAPI_VER_CURRENT) {
+        fprintf(stderr, "PAPI library init error!\n");
+        return 1;
+    }
+
+    int papi_event_set = PAPI_NULL;
+    int n_events = (int)event_names.size();
 
     if (event_names.empty()) {
         fprintf(stderr, "Error: no PAPI events specified.\n");
@@ -310,22 +270,26 @@ int main(int argc, char ** argv) {
             MAX_PAPI_EVENTS, event_names.size());
         return 1;
     }
+    std::vector<long long> papi_values(n_events, 0);
 
-    // --- Standard llama arg parsing ---
-    common_params params;
-
-    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
+    if (PAPI_create_eventset(&papi_event_set) != PAPI_OK) {
+        fprintf(stderr, "PAPI create eventset error!\n");
         return 1;
     }
 
-    common_init();
-    llama_backend_init();
-    llama_numa_init(params.numa);
-
-    // --- PAPI init ---
-    if (PAPI_library_init(PAPI_VER_CURRENT) != PAPI_VER_CURRENT) {
-        fprintf(stderr, "PAPI library init error!\n");
-        return 1;
+    // Dynamically resolve and add events by name
+    for (const auto & name : event_names) {
+        int code = 0;
+        if (PAPI_event_name_to_code(name.c_str(), &code) != PAPI_OK) {
+            fprintf(stderr, "PAPI: unknown event '%s'\n", name.c_str());
+            return 1;
+        }
+        if (PAPI_add_event(papi_event_set, code) != PAPI_OK) {
+            fprintf(stderr, "PAPI: failed to add event '%s' (may conflict with other events)\n",
+                name.c_str());
+            return 1;
+        }
+        printf("PAPI: added event %s\n", name.c_str());
     }
 
     // --- SQLite init (only if --use-db flag is set) ---
@@ -358,16 +322,14 @@ int main(int argc, char ** argv) {
         }
     }
 
-    // Generate unique run_id and event_item_id_counter from max existing values in database
-    int64_t run_id = 1;
-    int64_t event_item_id_start = 1;
+    // Generate unique run_id from max existing value in database
+    int64_t run_id = 1;  // Default if database is empty or unavailable
     if (use_database && db_conn != nullptr) {
         sqlite3_stmt* stmt = nullptr;
-        const char* sql = "SELECT COALESCE(MAX(run_id), 0) + 1, COALESCE(MAX(event_item_id), 0) + 1 FROM event_item";
+        const char* sql = "SELECT COALESCE(MAX(run_id), 0) + 1 FROM event_item";
         if (sqlite3_prepare_v2(db_conn, sql, -1, &stmt, nullptr) == SQLITE_OK) {
             if (sqlite3_step(stmt) == SQLITE_ROW) {
-                run_id             = sqlite3_column_int64(stmt, 0);
-                event_item_id_start = sqlite3_column_int64(stmt, 1);
+                run_id = sqlite3_column_int64(stmt, 0);
             }
             sqlite3_finalize(stmt);
         }
@@ -376,57 +338,26 @@ int main(int argc, char ** argv) {
 
     std::vector<event_record> pending_records;
 
-    callback_data cb_data;
-    cb_data.papi_event_set        = PAPI_NULL;
-    cb_data.out_file              = nullptr;
-    cb_data.token_index           = 0;
-    cb_data.phase                 = "prefill";
-    cb_data.n_events              = (int)event_names.size();
-    cb_data.db_conn               = db_conn;
-    cb_data.event_names           = &event_names;
-    cb_data.event_item_id_counter = (int)event_item_id_start;
-    cb_data.pending_records       = &pending_records;
-    cb_data.run_id                = run_id;
-
-    if (PAPI_create_eventset(&cb_data.papi_event_set) != PAPI_OK) {
-        fprintf(stderr, "PAPI create eventset error!\n");
-        return 1;
-    }
-
-    // Dynamically resolve and add events by name
-    for (const auto & name : event_names) {
-        int code = 0;
-        if (PAPI_event_name_to_code(name.c_str(), &code) != PAPI_OK) {
-            fprintf(stderr, "PAPI: unknown event '%s'\n", name.c_str());
-            return 1;
-        }
-        if (PAPI_add_event(cb_data.papi_event_set, code) != PAPI_OK) {
-            fprintf(stderr, "PAPI: failed to add event '%s' (may conflict with other events)\n",
-                name.c_str());
-            return 1;
-        }
-        printf("PAPI: added event %s\n", name.c_str());
-    }
-
     // --- Open CSV and write dynamic header ---
-    cb_data.out_file = fopen(result_path.c_str(), "w");
-    if (!cb_data.out_file) {
+    FILE * out_file = fopen(result_path.c_str(), "w");
+    if (!out_file) {
         fprintf(stderr, "Failed to open %s!\n", result_path.c_str());
         return 1;
     }
 
-    fprintf(cb_data.out_file, "phase,token_index,tensor_name,op_type,time_ns,size_bytes,n_elements");
-    for (const auto & name : event_names) {
-        std::string lower = name;
-        for (auto & c : lower) c = std::tolower(c);
-        fprintf(cb_data.out_file, ",%s", lower.c_str());
-    }
-    fprintf(cb_data.out_file, "\n");
+    // --- Standard llama arg parsing and initialization ---
+    common_params params;
 
-    // --- Hook up callbacks ---
-    params.cb_eval           = my_cb_eval;
-    params.cb_eval_user_data = &cb_data;
-    params.warmup            = false;
+    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
+        return 1;
+    }
+
+    common_init();
+    llama_backend_init();
+    llama_numa_init(params.numa);
+
+    // Currently no warmup, if we wan't more stable results this could possibly help?
+    params.warmup = false;
 
     auto llama_init = common_init_from_params(params);
     auto * model    = llama_init->model();
@@ -442,13 +373,23 @@ int main(int argc, char ** argv) {
     const int           n_predict = params.n_predict < 0 ? 256 : params.n_predict;
 
     auto * smpl = common_sampler_init(model, params.sampling);
-    const char * tmpl = llama_model_chat_template(model, nullptr);
+    std::vector<llama_token> conversation_tokens;  // Track all conversation tokens
+    int n_pos = 0;
+
     std::vector<llama_chat_message> messages;
-    messages.push_back({"system", strdup("You are a helpful assistant. Always respond in English.")});
     std::vector<char> formatted(n_ctx);
     int prev_len = 0;
-    std::string response_text;
-    int n_pos = 0;
+    const char * tmpl = llama_model_chat_template(model, nullptr);
+
+
+    ///////// START OF TOP-LEVEL MEASUREMENTS ///////
+    int64_t model_size = llama_model_size(model);
+    double model_size_mb = (double)model_size / (1024.0 * 1024.0);
+    int64_t start_time = now_ns();
+    int64_t start_cpu_time = get_cpu_time_ns();
+    int32_t generated_tokens = 0;
+    PAPI_start(papi_event_set);
+    /////////////////////////////////////////////////
 
     // Conversation loop
     bool continue_conversation = true;
@@ -464,8 +405,21 @@ int main(int argc, char ** argv) {
             current_prompt = params.prompt;
         } else {
             // Subsequent turns: get new user input
+
+            // Stop timing while waiting for user input to get a more accurate measure of model performance
+            int64_t user_time = now_ns();
+            int64_t user_cpu_time = get_cpu_time_ns();
+
             printf("\nUser (or 'quit' to exit): ");
             std::getline(std::cin, current_prompt);
+
+
+            int64_t user_input_time = now_ns() - user_time;
+            int64_t user_input_cpu_time = get_cpu_time_ns() - user_cpu_time;
+
+            //Re-adjust start time to exclude user input time, so that our measurements reflect only model processing time
+            start_time += user_input_time; // Adjust start time to exclude user input time
+            start_cpu_time += user_input_cpu_time; // Adjust CPU time as well
 
             if (current_prompt == "quit" || current_prompt == "exit" || current_prompt.empty()) {
                 printf("Ending conversation.\n");
@@ -473,96 +427,76 @@ int main(int argc, char ** argv) {
             }
         }
 
-        // Apply chat template to get only the new portion of the formatted prompt
         messages.push_back({"user", strdup(current_prompt.c_str())});
         int new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
-        if (new_len > (int)formatted.size()) {
-            formatted.resize(new_len);
-            new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
-        }
-        if (new_len < 0) {
-            fprintf(stderr, "Failed to apply chat template\n");
-            return 1;
-        }
-        std::string formatted_prompt(formatted.begin() + prev_len, formatted.begin() + new_len);
 
-        // PHASE 1: Tokenization
-        int64_t t_tok_start = now_ns();
-        std::vector<llama_token> new_tokens = common_tokenize(ctx, formatted_prompt, /*add_special=*/false, /*parse_special=*/true);
-        int64_t t_tok_end   = now_ns();
+        if (new_len > (int)formatted.size()) {
+        formatted.resize(new_len);
+        new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+        }
+
+        std::string prompt_delta(formatted.begin() + prev_len, formatted.begin() + new_len);
+
+        // --- PHASE 1: Tokenization ---
+
+        const bool add_bos  = llama_vocab_get_add_bos(vocab);
+        std::vector<llama_token> new_tokens = common_tokenize(ctx, prompt_delta, add_bos, true);
 
         if (new_tokens.empty()) {
             LOG_ERR("%s : no input tokens\n", __func__);
             continue;
         }
 
-        fprintf(cb_data.out_file, "tokenization,%d,n/a,n/a,%ld,%zu,%zu",
-            turn_number,
-            (t_tok_end - t_tok_start),
-            new_tokens.size() * sizeof(llama_token),
-            new_tokens.size()
-        );
-        write_zero_counters(cb_data.out_file, cb_data.n_events);
+        // Add new tokens to conversation history
+        conversation_tokens.insert(conversation_tokens.end(), new_tokens.begin(), new_tokens.end());
 
-        printf("Tokenization: %zu tokens, %ld ns\n",
-            new_tokens.size(), (t_tok_end - t_tok_start));
-
-        // Check if we're approaching context limit
-        if (n_pos + (int)new_tokens.size() + n_predict > n_ctx) {
-            printf("Warning: Conversation approaching context limit.\n");
+        // Check if we're exceeding context
+        if ((int)conversation_tokens.size() + n_predict > n_ctx) {
+            printf("Warning: Conversation history too long, truncating old tokens.\n");
+            int tokens_to_keep = n_ctx - n_predict - (int)new_tokens.size();
+            if (tokens_to_keep < 0) tokens_to_keep = 0;
+            conversation_tokens.erase(conversation_tokens.begin(),
+                                    conversation_tokens.end() - tokens_to_keep - (int)new_tokens.size());
+            conversation_tokens.insert(conversation_tokens.end(), new_tokens.begin(), new_tokens.end());
         }
 
         // PHASE 2: Prefill/Decode user input
-        cb_data.phase       = (turn_number == 1) ? "prefill" : "decode";
-        cb_data.token_index = turn_number;
 
         if (llama_decode(ctx, llama_batch_get_one(new_tokens.data(), (int)new_tokens.size()))) {
             LOG_ERR("%s : decode failed\n", __func__);
             return 1;
         }
         printf("User input processed.\n");
-        n_pos += (int)new_tokens.size();
+        n_pos = (int)conversation_tokens.size();
 
         // PHASE 3 + 4: Generate assistant response
         printf("Assistant: ");
         fflush(stdout);
 
-        response_text.clear();
+        std::vector<llama_token> response_tokens;
         for (int i = 0; i < n_predict; i++) {
 
             // PHASE 3: Sampling
-            int64_t t_samp_start = now_ns();
             llama_token new_token = common_sampler_sample(smpl, ctx, -1);
             common_sampler_accept(smpl, new_token, true);
-            int64_t t_samp_end = now_ns();
-
-            fprintf(cb_data.out_file, "sampling,%d,n/a,n/a,%ld,0,0",
-                turn_number * 1000 + i + 1,
-                (t_samp_end - t_samp_start)
-            );
-            write_zero_counters(cb_data.out_file, cb_data.n_events);
-
-            if (llama_vocab_is_eog(vocab, new_token)) break;
 
             std::string piece = common_token_to_piece(ctx, new_token);
-            // Strip leading whitespace from the first token of each response
-            if (i == 0) {
-                size_t start = piece.find_first_not_of(" \t\n\r");
-                piece = (start != std::string::npos) ? piece.substr(start) : "";
-            }
+
+            if (llama_vocab_is_eog(vocab, new_token)) break; //Check if end of generation token
+
             printf("%s", piece.c_str());
             fflush(stdout);
 
-            response_text += piece;
+            response_tokens.push_back(new_token);
+            generated_tokens++;
+            conversation_tokens.push_back(new_token);
+
             if (n_pos >= n_ctx - 1) {
                 printf("\n[Context limit reached]");
                 break;
             }
 
             // PHASE 4: Decode
-            cb_data.phase       = "decode";
-            cb_data.token_index = turn_number * 1000 + i + 1;
-
             if (llama_decode(ctx, llama_batch_get_one(&new_token, 1))) {
                 fprintf(stderr, "\nDecode failed\n");
                 break;
@@ -572,6 +506,10 @@ int main(int argc, char ** argv) {
 
         printf("\n");
 
+        std::string response_text;
+        for (auto & tok : response_tokens) {
+            response_text += common_token_to_piece(ctx, tok);
+        }
         // Update message history with assistant response
         messages.push_back({"assistant", strdup(response_text.c_str())});
         prev_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), false, nullptr, 0);
@@ -587,15 +525,71 @@ int main(int argc, char ** argv) {
         }
     }
 
+    ////// STOP TOP-LEVEL MEASUREMENTS ///////////
+    PAPI_stop(papi_event_set, papi_values.data());
+    int64_t end_time = now_ns();
+    int64_t end_cpu_time = get_cpu_time_ns();
+    int64_t end_rss_kb = get_peak_rss_kb();
+
+    //RUNTIME
+    int64_t runtime_ns = end_time - start_time;
+    double runtime_s = (double)runtime_ns / 1e9;
+
+    //CPU USAGE
+    int64_t cpu_time_ns = end_cpu_time - start_cpu_time;
+    double avg_cpu_usage = ((double)(cpu_time_ns * 100) / (double)runtime_ns) / (double)sysconf(_SC_NPROCESSORS_ONLN); // Adjust for number of CPU cores
+
+    //PEAK RSS
+    double rss_mb = (double)end_rss_kb / 1024.0; // Convert KB to MB
+
+    //TOKENS
+    double token_throughput = (double)generated_tokens / runtime_s;
+    int32_t total_tokens = (int32_t)conversation_tokens.size();
+
+    //KV-CACHE
+    int32_t kv_tokens_used = (int32_t)conversation_tokens.size();
+    int32_t kv_tokens_capacity = n_ctx;
+
+    int32_t n_layers = llama_model_n_layer(model);
+    int32_t n_embd   = llama_model_n_embd(model);
+    int64_t kv_size_used = (int64_t)kv_tokens_used * n_layers * n_embd * sizeof(params.cache_type_k); // Assuming K and V have the same type and size, this is a simplification. For more accuracy, you could calculate K and V sizes separately based on their types.
+    int64_t kv_size_capacity = (int64_t)kv_tokens_capacity * n_layers * n_embd * sizeof(params.cache_type_k);
+
+    if(params.cache_type_k != params.cache_type_v) {
+        printf("Warning: cache_type_k and cache_type_v are different, but kv_size calculations assume they are the same. Results may be inaccurate.\n");
+    }
+
+    //////////////////////////////////////////////
+
     printf("\n--- Conversation ended ---\n");
 
-    for (auto & msg : messages) {
-        free(const_cast<char *>(msg.content));
+    // Write results to CSV in top-view format
+    fprintf(out_file, "TOP_VIEW\n");
+    fprintf(out_file, "model_size: %ld bytes\n", model_size);
+    fprintf(out_file, "model_size_mb: %.2f MB\n", model_size_mb);
+    fprintf(out_file, "runtime_ns: %ld ns\n", runtime_ns);
+    fprintf(out_file, "runtime_s: %.2f s\n", runtime_s);
+    fprintf(out_file, "Peak_RSS_MB: %.2f MB\n", rss_mb);
+    fprintf(out_file, "AVG_CPU_usage: %.2f%%\n", avg_cpu_usage);
+    fprintf(out_file, "generated_tokens: %d\n", generated_tokens);
+    fprintf(out_file, "total_tokens: %d\n", total_tokens);
+    fprintf(out_file, "token_throughput: %.2f tokens/s\n", token_throughput);
+    fprintf(out_file, "kv_tokens_used: %d\n", kv_tokens_used);
+    fprintf(out_file, "kv_tokens_capacity: %d\n", kv_tokens_capacity);
+    fprintf(out_file, "kv_size_used_bytes: %ld bytes\n", kv_size_used);
+    fprintf(out_file, "kv_size_capacity_bytes: %ld bytes\n", kv_size_capacity);
+    // Loop adds selected PAPI events to the output
+    for (size_t i = 0; i < event_names.size(); i++) {
+        fprintf(out_file, "%s: %lld\n", event_names[i].c_str(), papi_values[i]);
     }
+
+
+    // Clean up
     common_sampler_free(smpl);
-    fclose(cb_data.out_file);
-    PAPI_destroy_eventset(&cb_data.papi_event_set);
+    fclose(out_file);
+    PAPI_destroy_eventset(&papi_event_set);
     PAPI_shutdown();
+    llama_backend_free();
 
     // Batch insert all accumulated records into database
     if (use_database && db_conn != nullptr) {
@@ -607,8 +601,6 @@ int main(int argc, char ** argv) {
         sqlite3_close(db_conn);
         printf("SQLite database closed.\n");
     }
-
-    llama_backend_free();
 
     printf("Measurements saved to %s\n", result_path.c_str());
     if (use_database && db_conn != nullptr) {
