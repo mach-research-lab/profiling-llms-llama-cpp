@@ -1,682 +1,1512 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PAPI Profiler</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>llama.cpp Profiler</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['JetBrains Mono', 'monospace'],
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          },
+          colors: {
+            background: '#0a0a0f',
+            foreground: '#e4e4ed',
+            card: '#12121a',
+            border: '#2a2a3a',
+            primary: { DEFAULT: '#22c55e', foreground: '#0a0a0f' },
+            secondary: { DEFAULT: '#1a1a26', foreground: '#c4c4d4' },
+            muted: { DEFAULT: '#1a1a26', foreground: '#6b6b80' },
+            destructive: { DEFAULT: '#ef4444', foreground: '#fecaca' },
+          }
         }
+      }
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body { font-family: 'Inter', system-ui, sans-serif; background: #0a0a0f; color: #e4e4ed; display: flex; flex-direction: column; }
 
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
+    /* Scrollbars */
+    .scrollable { overflow-y: auto; }
+    .scrollable::-webkit-scrollbar { width: 5px; }
+    .scrollable::-webkit-scrollbar-track { background: transparent; }
+    .scrollable::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 3px; }
 
-        .container {
-            max-width: 900px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            padding: 40px;
-        }
+    /* Animations */
+    @keyframes ping { 75%, 100% { transform: scale(2); opacity: 0; } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .animate-ping { animation: ping 1s cubic-bezier(0, 0, 0.2, 1) infinite; }
+    .animate-spin { animation: spin 1s linear infinite; }
 
-        h1 {
-            color: #333;
-            margin-bottom: 10px;
-            font-size: 2em;
-        }
+    /* Dropdown */
+    .dropdown { position: relative; display: inline-block; }
+    .dropdown-content {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      z-index: 50;
+      min-width: 180px;
+      background: #12121a;
+      border: 1px solid #2a2a3a;
+      border-radius: 6px;
+      padding: 4px;
+      margin-top: 4px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    .dropdown-content.open { display: block; }
+    .dropdown-label {
+      font-size: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      color: #6b6b80;
+      padding: 6px 8px 4px;
+      display: block;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .dropdown-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      padding: 6px 8px;
+      font-size: 12px;
+      color: #e4e4ed;
+      background: none;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      text-align: left;
+      font-family: 'Inter', sans-serif;
+      transition: background 0.1s;
+    }
+    .dropdown-item:hover { background: #1a1a26; }
+    .dropdown-item.active { color: #22c55e; font-weight: 500; }
+    .dropdown-sep { height: 1px; background: #2a2a3a; margin: 4px 0; }
 
-        .subtitle {
-            color: #666;
-            margin-bottom: 30px;
-            font-size: 0.95em;
-        }
+    /* Ghost button */
+    .btn-ghost {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      color: #6b6b80;
+      background: none;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: color 0.1s, background 0.1s;
+      white-space: nowrap;
+    }
+    .btn-ghost:hover { color: #e4e4ed; background: #1a1a26; }
 
-        .form-group {
-            margin-bottom: 25px;
-        }
+    /* Send button */
+    .btn-send {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      background: #22c55e;
+      color: #0a0a0f;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background 0.1s;
+    }
+    .btn-send:hover { background: #16a34a; }
 
-        label {
-            display: block;
-            margin-bottom: 8px;
-            color: #333;
-            font-weight: 600;
-        }
+    /* View mode buttons */
+    .view-btn {
+      display: block;
+      width: 100%;
+      padding: 6px 12px;
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      color: #6b6b80;
+      background: none;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      cursor: pointer;
+      text-align: left;
+      transition: color 0.1s, background 0.1s, border-color 0.1s;
+    }
+    .view-btn:hover { color: #e4e4ed; background: #1a1a26; }
+    .view-btn.active { color: #22c55e; background: rgba(34,197,94,0.08); border-color: rgba(34,197,94,0.3); }
 
-        select,
-        input,
-        textarea {
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #e0e0e0;
-            border-radius: 6px;
-            font-size: 14px;
-            transition: border-color 0.3s;
-        }
+    /* Metric tab buttons */
+    .metric-btn {
+      padding: 3px 8px;
+      font-size: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      color: #6b6b80;
+      background: #1a1a26;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: color 0.1s, background 0.1s;
+    }
+    .metric-btn:hover { color: #e4e4ed; }
+    .metric-btn.active { color: #22c55e; background: rgba(34,197,94,0.08); border-color: rgba(34,197,94,0.3); }
 
-        select:focus,
-        input:focus,
-        textarea:focus {
-            outline: none;
-            border-color: #667eea;
-        }
+    /* Chat message input */
+    .chat-input {
+      flex: 1;
+      background: #1a1a26;
+      color: #e4e4ed;
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 6px 12px;
+      border: 1px solid #2a2a3a;
+      border-radius: 6px;
+      outline: none;
+      transition: border-color 0.1s;
+      min-width: 0;
+    }
+    .chat-input::placeholder { color: #6b6b80; }
+    .chat-input:focus { border-color: rgba(34,197,94,0.5); }
 
-        .checkbox-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-            gap: 10px;
-            max-height: 300px;
-            overflow-y: auto;
-            padding: 15px;
-            background: #f9f9f9;
-            border-radius: 6px;
-        }
+    /* Ping dot */
+    .ping-dot {
+      position: relative;
+      display: inline-flex;
+      width: 8px;
+      height: 8px;
+      flex-shrink: 0;
+    }
+    .ping-dot .ping-ring {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background: #22c55e;
+      opacity: 0.75;
+    }
+    .ping-dot .ping-core {
+      position: relative;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #22c55e;
+    }
 
-        .checkbox-item {
-            display: flex;
-            align-items: flex-start;
-        }
+    /* Mini bar for per-layer metrics */
+    .mini-bar-track {
+      flex: 1;
+      height: 10px;
+      background: #1a1a26;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .mini-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+    }
 
-        .checkbox-item input[type="checkbox"] {
-            width: auto;
-            margin-right: 8px;
-            margin-top: 3px;
-        }
+    /* Heatmap grid */
+    .heatmap-grid {
+      display: grid;
+      grid-template-columns: 36px 1fr 1fr 1fr 60px;
+      gap: 1px;
+      background: #2a2a3a;
+      font-size: 10px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .heatmap-grid > div {
+      padding: 4px 8px;
+    }
+    .heatmap-header {
+      background: #1a1a26;
+      color: #6b6b80;
+      font-weight: 600;
+    }
+    .heatmap-cell-plain {
+      background: #12121a;
+      color: #e4e4ed;
+    }
+    .heatmap-cell-total {
+      background: #12121a;
+      color: #e4e4ed;
+      text-align: right;
+    }
 
-        .checkbox-item label {
-            margin: 0;
-            font-weight: normal;
-            font-size: 0.9em;
-        }
+    /* KV cache grid */
+    .kv-grid {
+      display: grid;
+      grid-template-columns: 36px 1fr 1fr 1fr;
+      gap: 1px;
+      background: #2a2a3a;
+      font-size: 10px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .kv-grid > div {
+      background: #12121a;
+      padding: 4px 8px;
+      color: #e4e4ed;
+    }
+    .kv-grid-header {
+      background: #1a1a26 !important;
+      color: #6b6b80;
+      font-weight: 600;
+    }
 
-        .event-name {
-            font-weight: 600;
-            color: #667eea;
-        }
+    /* Cache miss bar */
+    .miss-bar-track {
+      width: 72px;
+      height: 6px;
+      background: #1a1a26;
+      border-radius: 9999px;
+      overflow: hidden;
+      margin-left: auto;
+    }
+    .miss-bar-fill {
+      height: 100%;
+      border-radius: 9999px;
+    }
+    .dropdown-item input {
+      background: transparent;
+      border: none;
+      border-bottom: 1px solid rgba(255,255,255,0.2);
+      color: inherit;
+      font: inherit;
+      width: 80px;
+      text-align: right;
+      outline: none;
+      padding: 0 2px;
+    }
 
-        .event-desc {
-            color: #666;
-            font-size: 0.85em;
-        }
+    .dropdown-item input:focus {
+      border-bottom-color: #22c55e;
+    }
 
-        button {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            padding: 15px 30px;
-            border-radius: 6px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
-            width: 100%;
-        }
+    .dropdown-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      cursor: default;  /* remove pointer since it's no longer a button */
+    }
 
-        button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-        }
+    /* Chart containers */
+    .chart-container { position: relative; }
 
-        button:active {
-            transform: translateY(0);
-        }
+    /* Viz panel show/hide */
+    .viz-view { display: none; width: 100%; height: 100%; }
+    .viz-view.active { display: flex; flex-direction: column; }
 
-        button:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-            transform: none;
-        }
 
-        .output {
-            margin-top: 30px;
-            padding: 20px;
-            background: #f9f9f9;
-            border-radius: 6px;
-            border-left: 4px solid #667eea;
-            display: none;
-        }
+        /* Generate Roofline button */
+    .btn-generate-roofline {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 20px;
+      font-size: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      color: #22c55e;
+      background: rgba(34, 197, 94, 0.08);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: color 0.15s, background 0.15s, border-color 0.15s, transform 0.1s;
+      letter-spacing: 0.04em;
+    }
 
-        .output.show {
-            display: block;
-        }
+    .btn-generate-roofline:hover {
+      color: #4ade80;
+      background: rgba(34, 197, 94, 0.15);
+      border-color: rgba(34, 197, 94, 0.5);
+    }
 
-        .output h3 {
-            margin-bottom: 15px;
-            color: #333;
-        }
+    .btn-generate-roofline:active {
+      transform: scale(0.97);
+      background: rgba(34, 197, 94, 0.2);
+    }
 
-        .output pre {
-            background: #1e1e1e;
-            color: #d4d4d4;
-            padding: 15px;
-            border-radius: 6px;
-            overflow-x: auto;
-            font-size: 13px;
-            line-height: 1.5;
-        }
-
-        .loading {
-            display: none;
-            text-align: center;
-            padding: 20px;
-        }
-
-        .loading.show {
-            display: block;
-        }
-
-        .spinner {
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #667eea;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 10px;
-        }
-
-        @keyframes spin {
-            0% {
-                transform: rotate(0deg);
-            }
-
-            100% {
-                transform: rotate(360deg);
-            }
-        }
-
-        .error {
-            background: #fee;
-            border-left-color: #f44;
-            color: #c33;
-        }
-
-        .success {
-            background: #efe;
-            border-left-color: #4c4;
-            color: #363;
-        }
-
-        .warning {
-            color: #ff6b6b;
-            font-size: 0.9em;
-            margin-top: 5px;
-        }
-    </style>
+    /* Centered wrapper inside the viz panel */
+    #view-roofline .generate-roofline {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      flex: 1;
+      color: #6b6b80;
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+  </style>
 </head>
-
 <body>
-    <div class="container">
-        <h1>PAPI Profiler</h1>
-        <p class="subtitle">Profile llama.cpp models with PAPI hardware counters</p>
 
-        <div class="form-group">
-            <label for="model">Select Model</label>
-            <select id="model">
-                <option value="">Loading models...</option>
-            </select>
-        </div>
+<!-- ===== SETTINGS BAR ===== -->
+<header style="display:flex; align-items:center; gap:8px; padding:6px 16px; border-bottom:1px solid #2a2a3a; background:#12121a; flex-shrink:0;">
+  <!-- Logo -->
+  <div style="display:flex; align-items:center; gap:8px; margin-right:12px;">
+    <div style="display:flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:6px; background:rgba(34,197,94,0.1);">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/>
+      </svg>
+    </div>
+    <span style="font-size:13px; font-weight:600; color:#e4e4ed; letter-spacing:-0.02em;">llama.cpp Profiler</span>
+  </div>
 
-        <div class="form-group">
-            <label>Select PAPI Events (max 4)</label>
-            <p class="warning" id="event-warning" style="display: none;">Maximum 4 events allowed</p>
-            <div class="checkbox-grid" id="events"></div>
-        </div>
+  <div style="width:1px; height:20px; background:#2a2a3a;"></div>
 
-        <div class="form-group">
-            <label for="prompt">Prompt</label>
-            <textarea id="prompt" rows="3"
-                placeholder="Enter your prompt here...">What is the capital of Sweden?</textarea>
-        </div>
+  <!-- Settings dropdown -->
+  <div class="dropdown">
+    <button class="btn-ghost" onclick="toggleDropdown('dd-settings')">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+      Settings
+    </button>
+    <div class="dropdown-content" id="dd-settings">
+      <span class="dropdown-label">General</span>
+      <label class="dropdown-item">
+        Thread Count(NOT IMPLEMENTED IN JS YET):
+        <input id="thread-count" type="text" value="8" maxlength="6" />
+      </label>
+      <label class="dropdown-item">
+        Tokens to generate:
+      <input id="tokens-to-generate" type="text" value="64" maxlength="6" />
+      </label>
+    </div>
+  </div>
 
-        <div class="form-group">
-            <label for="n_predict">Tokens to Generate</label>
-            <input type="number" id="n_predict" value="64" min="1" max="2048">
-        </div>
+  <!-- Model dropdown -->
+  <div class="dropdown">
+    <button class="btn-ghost" onclick="toggleDropdown('dd-model')">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>
+      <span id="selected-model-label">Select Model</span>
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
+    <div class="dropdown-content" id="dd-model" style="min-width:160px;">
+      <span class="dropdown-label"></span>
+    </div>
+  </div>
 
-        <button id="run-btn" onclick="runProfile()">Run Profiling</button>
+  <!-- Counters dropdown -->
+  <div class="dropdown">
+    <button class="btn-ghost" onclick="toggleDropdown('dd-counters')">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+      Events
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
+    <div class="dropdown-content" id="dd-counters" style="min-width:180px;">
+      <!-- dynamically filled by JS -->
+    </div>
+  </div>
 
-        <div class="loading" id="loading">
-            <div class="spinner"></div>
-            <p>Running profiling...</p>
-        </div>
+  <!-- Other dropdown -->
+  <div class="dropdown">
+    <button class="btn-ghost" onclick="toggleDropdown('dd-other')">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+      Other
+    </button>
+    <div class="dropdown-content" id="dd-other">
+      <button class="dropdown-item">Export Profile</button>
+      <button class="dropdown-item">Import Profile</button>
+      <div class="dropdown-sep"></div>
+      <button class="dropdown-item">Compare Runs</button>
+      <button class="dropdown-item">Reset All</button>
+    </div>
+  </div>
 
-        <div class="output" id="output"></div>
+  <!-- Right side info -->
+  <div style="margin-left:auto; display:flex; align-items:center; gap:12px;">
+    <span style="font-size:11px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">
+      CPU: <span id="CPU_INFO" style="color:#e4e4ed;"></span>
+    </span>
+    <div style="width:1px; height:20px; background:#2a2a3a;"></div>
+    <span style="font-size:11px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">
+      Architecture: <span id="ARCH_INFO" style="color:#e4e4ed;"></span>
+    </span>
+  </div>
+</header>
 
-        <!-- CSV Measurements -->
-        <div class="output" id="csv-output" style="margin-top: 20px;"></div>
+<!-- ===== MAIN CONTENT ===== -->
+<div style="flex:1; display:flex; overflow:hidden; min-height:0;">
 
-        <!-- Analysis Section -->
-        <div id="analysis-section" style="margin-top: 30px; padding-top: 30px; border-top: 2px solid #e0e0e0;">
-            <h2 style="margin-bottom: 20px; color: #333;">Roofline Analysis</h2>
-            <p style="color: #666; margin-bottom: 20px; font-style: italic;">
-                Note: Currently showing hardcoded example kernels for demonstration.
-                Future integration will plot actual PAPI profiling data.
-            </p>
-
-            <div class="form-group">
-                <label for="hardware">Hardware Profile</label>
-                <select id="hardware">
-                    <option value="">Loading hardware profiles...</option>
-                </select>
-            </div>
-
-            <div class="form-group">
-                <label for="plot-style">Plot Style</label>
-                <select id="plot-style">
-                    <option value="academic">Academic (Linear)</option>
-                    <option value="loglog">Log-Log</option>
-                    <option value="advisor">Intel Advisor Style</option>
-                </select>
-            </div>
-
-            <button onclick="runAnalysis()">Generate Roofline Plot</button>
-
-            <div class="loading" id="analysis-loading">
-                <div class="spinner"></div>
-                <p>Generating analysis...</p>
-            </div>
-
-            <div class="output" id="analysis-output"></div>
-        </div>
+  <!-- LEFT: Chat Panel -->
+  <div style="width:320px; flex-shrink:0; display:flex; flex-direction:column; border-right:1px solid #2a2a3a; background:#12121a;">
+    <!-- Chat header -->
+    <div style="display:flex; align-items:center; gap:8px; padding:10px 16px; border-bottom:1px solid #2a2a3a; flex-shrink:0;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+      <span style="font-size:10px; font-weight:600; color:#e4e4ed; text-transform:uppercase; letter-spacing:0.08em; font-family:'JetBrains Mono',monospace;">Inference</span>
+      <span id="msg-count" style="margin-left:auto; font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">4 messages</span>
     </div>
 
-    <script>
-        const API_URL = 'http://localhost:8000';
-        let lastProfilingOutput = null;
+    <!-- Messages -->
+    <div id="chat-messages" class="scrollable" style="flex:1; padding:12px; display:flex; flex-direction:column; gap:12px; overflow-y:auto;">
+    </div>
 
-        // Load models on page load
-        async function loadModels() {
-            try {
-                const response = await fetch(`${API_URL}/models`);
-                const models = await response.json();
+    <!-- Input area -->
+    <div style="padding:12px; border-top:1px solid #2a2a3a; flex-shrink:0;">
+      <form id="chat-form" style="display:flex; align-items:center; gap:8px;" onsubmit="sendMessage(event)">
+        <input id="chat-input" class="chat-input" type="text" placeholder="Enter prompt..." />
+        <button type="submit" class="btn-send">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </form>
+      <div id="analyzing-indicator" style="display:none; margin-top:8px; display:none; align-items:center; gap:8px;">
+        <div class="ping-dot">
+          <span class="ping-ring animate-ping"></span>
+          <span class="ping-core"></span>
+        </div>
+        <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#22c55e; font-weight:600; text-transform:uppercase; letter-spacing:0.06em;">Analysis Ongoing</span>
+      </div>
+    </div>
+  </div>
 
-                const select = document.getElementById('model');
-                select.innerHTML = '';
+  <!-- CENTER + RIGHT -->
+  <div style="flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0;">
 
-                if (models.length === 0) {
-                    select.innerHTML = '<option value="">No models found</option>';
-                    return;
-                }
+    <!-- TOP: Visualization + Mode Selector -->
+    <div style="flex:1; display:flex; overflow:hidden; min-height:0;">
 
-                models.forEach(model => {
-                    const option = document.createElement('option');
-                    option.value = model.path;
-                    option.textContent = model.display_name;
-                    select.appendChild(option);
-                });
-            } catch (error) {
-                console.error('Error loading models:', error);
-                document.getElementById('model').innerHTML = '<option value="">Error loading models</option>';
-            }
+      <!-- Visualization Panel -->
+      <div style="flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0;">
+        <!-- Viz header -->
+        <div style="display:flex; align-items:center; justify-content:space-between; padding:6px 16px; border-bottom:1px solid #2a2a3a; flex-shrink:0;">
+          <h2 id="viz-title" style="font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:#e4e4ed; font-family:'JetBrains Mono',monospace;">Roofline Model</h2>
+          <div style="display:flex; align-items:center; gap:12px;">
+          </div>
+        </div>
+
+        <!-- Viz content -->
+        <div style="flex:1; padding:16px; min-height:0; position:relative; overflow:hidden;">
+
+          <!-- Roofline view -->
+          <div id="view-roofline" class="viz-view active">
+            <div class="generate-roofline">
+              <button class="btn-generate-roofline" onclick="generateRoofline()">
+                ⬡ Generate Roofline
+              </button>
+            </div>
+            <canvas id="roofline-chart" style="max-width:100%; max-height:100%; display:none;"></canvas>
+          </div>
+
+          <!-- Heatmap view -->
+          <div id="view-heatmap" class="viz-view" style="overflow-y:auto; flex-direction:column; gap:12px;">
+            <!-- legend -->
+            <div style="display:flex; align-items:center; gap:8px; flex-shrink:0;">
+              <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">Intensity:</span>
+              <div style="display:flex; gap:2px;">
+                <div style="width:14px;height:10px;border-radius:2px;background:rgba(34,197,94,0.2);"></div>
+                <div style="width:14px;height:10px;border-radius:2px;background:rgba(34,197,94,0.4);"></div>
+                <div style="width:14px;height:10px;border-radius:2px;background:rgba(34,197,94,0.6);"></div>
+                <div style="width:14px;height:10px;border-radius:2px;background:rgba(34,197,94,0.8);"></div>
+                <div style="width:14px;height:10px;border-radius:2px;background:rgba(34,197,94,1.0);"></div>
+              </div>
+              <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">Low to High</span>
+            </div>
+            <div id="heatmap-grid" class="heatmap-grid">
+              <!-- filled by JS -->
+            </div>
+          </div>
+
+          <!-- KV-Cache view -->
+          <div id="view-kvcache" class="viz-view" style="flex-direction:column; gap:12px; overflow-y:auto;">
+            <!-- stats row -->
+            <div style="display:flex; align-items:center; gap:24px; flex-shrink:0;">
+              <div style="display:flex; flex-direction:column;">
+                <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">Total KV-Cache</span>
+                <span style="font-size:18px; font-weight:600; font-family:'JetBrains Mono',monospace; color:#e4e4ed;">2.048 GB</span>
+              </div>
+              <div style="display:flex; flex-direction:column;">
+                <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">Seq Length</span>
+                <span style="font-size:18px; font-weight:600; font-family:'JetBrains Mono',monospace; color:#e4e4ed;">4096</span>
+              </div>
+              <div style="display:flex; flex-direction:column;">
+                <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">Heads</span>
+                <span style="font-size:18px; font-weight:600; font-family:'JetBrains Mono',monospace; color:#e4e4ed;">32</span>
+              </div>
+              <div style="display:flex; flex-direction:column;">
+                <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">Head Dim</span>
+                <span style="font-size:18px; font-weight:600; font-family:'JetBrains Mono',monospace; color:#e4e4ed;">128</span>
+              </div>
+            </div>
+            <div style="flex-shrink:0; height:180px; position:relative;">
+              <canvas id="kvcache-chart"></canvas>
+            </div>
+            <div id="kv-grid" class="kv-grid">
+              <!-- filled by JS -->
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Mode Selector -->
+      <div style="width:140px; flex-shrink:0; display:flex; flex-direction:column; border-left:1px solid #2a2a3a; background:#12121a; padding:12px; gap:6px;">
+        <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:4px;">Visualizations</span>
+        <button class="view-btn active" onclick="setViewMode('roofline',this)" id="vbtn-roofline">Roofline</button>
+        <button class="view-btn" onclick="setViewMode('heatmap',this)" id="vbtn-heatmap">Heatmap</button>
+        <button class="view-btn" onclick="setViewMode('kvcache',this)" id="vbtn-kvcache">View KV-cache</button>
+
+        <!-- Legend -->
+        <div style="margin-top:8px; padding-top:8px; border-top:1px solid #2a2a3a;">
+          <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80; text-transform:uppercase; letter-spacing:0.06em;">Legend</span>
+          <div style="margin-top:8px; display:flex; flex-direction:column; gap:6px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="width:10px; height:10px; border-radius:2px; background:#3b82f6; flex-shrink:0;"></span>
+              <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">embed</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="width:10px; height:10px; border-radius:2px; background:#ef4444; flex-shrink:0;"></span>
+              <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">attn</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="width:10px; height:10px; border-radius:2px; background:#22c55e; flex-shrink:0;"></span>
+              <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">ffn</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="width:10px; height:10px; border-radius:2px; background:#f59e0b; flex-shrink:0;"></span>
+              <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">norm</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="width:10px; height:10px; border-radius:2px; background:#8b5cf6; flex-shrink:0;"></span>
+              <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">compute</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- BOTTOM: Data Tables -->
+    <div style="height:340px; flex-shrink:0; display:flex; border-top:1px solid #2a2a3a; overflow:hidden;">
+
+      <!-- Layer Exec Time -->
+      <div style="flex:1; display:flex; flex-direction:column; border-right:1px solid #2a2a3a; min-width:0;">
+        <div style="padding:6px 16px; border-bottom:1px solid #2a2a3a; flex-shrink:0;">
+          <h3 style="font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:#e4e4ed; font-family:'JetBrains Mono',monospace;">Layer Exec Time</h3>
+        </div>
+        <div class="scrollable" style="flex:1; padding:8px;">
+          <div style="height:160px; position:relative;">
+            <canvas id="layer-exec-chart"></canvas>
+          </div>
+          <table style="width:100%; font-size:10px; font-family:'JetBrains Mono',monospace; margin-top:8px; border-collapse:collapse;">
+            <thead>
+              <tr style="border-bottom:1px solid #2a2a3a;">
+                <th style="text-align:left; padding:6px 8px; color:#6b6b80; font-weight:600;">Layer</th>
+                <th style="text-align:right; padding:6px 8px; color:#6b6b80; font-weight:600;">Time (us)</th>
+                <th style="text-align:right; padding:6px 8px; color:#6b6b80; font-weight:600;">Type</th>
+              </tr>
+            </thead>
+            <tbody id="layer-exec-table"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Cache Misses -->
+      <div style="flex:1; display:flex; flex-direction:column; border-right:1px solid #2a2a3a; min-width:0;">
+        <div style="padding:6px 16px; border-bottom:1px solid #2a2a3a; flex-shrink:0;">
+          <h3 style="font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:#e4e4ed; font-family:'JetBrains Mono',monospace;">Cache Misses</h3>
+        </div>
+        <div class="scrollable" style="flex:1; padding:12px;">
+          <table style="width:100%; font-size:10px; font-family:'JetBrains Mono',monospace; border-collapse:collapse;">
+            <thead>
+              <tr style="border-bottom:1px solid #2a2a3a;">
+                <th style="text-align:left; padding:6px 8px; color:#6b6b80; font-weight:600;">Cache</th>
+                <th style="text-align:right; padding:6px 8px; color:#6b6b80; font-weight:600;">Amount</th>
+                <th style="text-align:right; padding:6px 8px; color:#6b6b80; font-weight:600;">Miss %</th>
+                <th style="padding:6px 8px; color:#6b6b80; font-weight:600; text-align:right;">Bar</th>
+              </tr>
+            </thead>
+            <tbody id="cache-miss-table"></tbody>
+          </table>
+          <div style="margin-top:16px; padding-top:12px; border-top:1px solid #2a2a3a;">
+            <h4 style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80; text-transform:uppercase; margin-bottom:8px;">Summary</h4>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+              <div style="display:flex; flex-direction:column;">
+                <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">Total Refs</span>
+                <span style="font-size:13px; font-weight:600; font-family:'JetBrains Mono',monospace; color:#e4e4ed;">14.7M</span>
+              </div>
+              <div style="display:flex; flex-direction:column;">
+                <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">Miss Rate</span>
+                <span style="font-size:13px; font-weight:600; font-family:'JetBrains Mono',monospace; color:#ef4444;">32.4%</span>
+              </div>
+              <div style="display:flex; flex-direction:column;">
+                <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">CPI</span>
+                <span style="font-size:13px; font-weight:600; font-family:'JetBrains Mono',monospace; color:#e4e4ed;">2.34</span>
+              </div>
+              <div style="display:flex; flex-direction:column;">
+                <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#6b6b80;">IPC</span>
+                <span style="font-size:13px; font-weight:600; font-family:'JetBrains Mono',monospace; color:#22c55e;">0.43</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Per-Layer Metrics -->
+      <div style="width:240px; flex-shrink:0; display:flex; flex-direction:column; min-width:0;">
+        <div style="padding:6px 16px; border-bottom:1px solid #2a2a3a; flex-shrink:0;">
+          <h3 style="font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:0.08em; color:#e4e4ed; font-family:'JetBrains Mono',monospace;">Per-Layer Metrics</h3>
+        </div>
+        <div style="display:flex; gap:4px; padding:8px 12px 0; flex-shrink:0;">
+          <button class="metric-btn active" onclick="setMetricView('flops',this)">FLOPS</button>
+          <button class="metric-btn" onclick="setMetricView('footprint',this)">Footprint</button>
+          <button class="metric-btn" onclick="setMetricView('bandwidth',this)">BW</button>
+        </div>
+        <div class="scrollable" style="flex:1; padding:12px;">
+          <div id="metric-flops" class="metric-view" style="display:flex; flex-direction:column; gap:5px;"></div>
+          <div id="metric-footprint" class="metric-view" style="display:none; flex-direction:column; gap:5px;"></div>
+          <div id="metric-bandwidth" class="metric-view" style="display:none; flex-direction:column; gap:5px;"></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ===== STATUS BAR ===== -->
+<footer style="display:flex; align-items:center; gap:16px; padding:5px 16px; border-top:1px solid #2a2a3a; background:#12121a; font-size:10px; font-family:'JetBrains Mono',monospace; flex-shrink:0;">
+  <div id="status-indicator" style="display:flex; align-items:center; gap:8px;">
+    <span style="display:inline-flex; border-radius:50%; width:6px; height:6px; background:#22c55e;"></span>
+    <span style="color:#6b6b80;">Ready</span>
+  </div>
+  <div style="margin-left:auto; display:flex; align-items:center; gap:16px; color:#6b6b80;">
+    <span>Tokens/s: <span style="color:#e4e4ed;">42.3</span></span>
+    <span>Prompt eval: <span style="color:#e4e4ed;">1.2s</span></span>
+    <span>Sampling: <span style="color:#e4e4ed;">top_p=0.9</span></span>
+    <span>Temp: <span style="color:#e4e4ed;">0.7</span></span>
+  </div>
+</footer>
+
+<script>
+
+const API_URL = 'http://localhost:8000'; //Rember to change if using different port
+
+// ============================
+// DATA                             Should be retrived from backend
+// ============================
+
+const rooflineLineData = [
+  {x:0.0625, y:1.0}, {x:0.125, y:2.0}, {x:0.25, y:4.0}, {x:0.5, y:8.0},
+  {x:1, y:16.0}, {x:2, y:32.0}, {x:4, y:64.0}, {x:8, y:128},
+  {x:16, y:150}, {x:32, y:150}, {x:64, y:150}, {x:128, y:150},
+]
+
+const operationPoints = [
+  {x:0.5, y:6.2, name:'Embedding', layer:'embed'},
+  {x:2.1, y:28, name:'Attn QKV', layer:'attn'},
+  {x:4.8, y:65, name:'Attn Out', layer:'attn'},
+  {x:1.2, y:15, name:'FFN Up', layer:'ffn'},
+  {x:3.5, y:48, name:'FFN Down', layer:'ffn'},
+  {x:0.3, y:4.5, name:'RMSNorm', layer:'norm'},
+  {x:12, y:140, name:'Matmul', layer:'compute'},
+  {x:0.8, y:10, name:'Softmax', layer:'attn'},
+]
+
+const layerColors = {
+  embed: '#3b82f6',
+  attn: '#ef4444',
+  ffn: '#22c55e',
+  norm: '#f59e0b',
+  compute: '#8b5cf6',
+}
+
+// Seeded pseudo-random for stable data
+function seededRand(seed) {
+  let s = seed
+  return function() {
+    s = (s * 1664525 + 1013904223) & 0xffffffff
+    return (s >>> 0) / 0xffffffff
+  }
+}
+
+const rand1 = seededRand(42)
+const heatmapLayers = Array.from({length:32}, (_,i) => {
+  const base = rand1() * 200 + 50
+  const attn = base * (0.8 + rand1() * 0.4)
+  const ffn = base * (0.6 + rand1() * 0.5)
+  const norm = base * (0.1 + rand1() * 0.1)
+  return {layer: i+1, attn, ffn, norm, total: attn+ffn+norm}
+})
+
+const rand2 = seededRand(99)
+const kvCacheData = Array.from({length:32}, (_,i) => ({
+  layer: i+1,
+  keySize: Math.round((4096*128*2)/1024),
+  valueSize: Math.round((4096*128*2)/1024),
+  utilization: 45 + rand2() * 50,
+}))
+
+const rand3 = seededRand(77)
+const layerExecData = Array.from({length:32}, (_,i) => ({
+  layer: i+1,
+  time: Math.round(50 + rand3() * 200),
+  type: i % 2 === 0 ? 'attn' : 'ffn',
+})).sort((a,b) => b.time - a.time)
+
+const cacheMissData = [
+  {cache:'L1d', amount:'1.6M', percent:10.2, color:'#22c55e'},
+  {cache:'L1i', amount:'420K', percent:2.8, color:'#3b82f6'},
+  {cache:'L2',  amount:'3.5M', percent:35.1, color:'#f59e0b'},
+  {cache:'L3',  amount:'9.0M', percent:80.4, color:'#ef4444'},
+  {cache:'TLB', amount:'180K', percent:1.2, color:'#8b5cf6'},
+]
+
+const rand4 = seededRand(55)
+const perLayerData = Array.from({length:32}, (_,i) => ({
+  layer: i+1,
+  l1: Math.round(30000 + rand4() * 80000),
+  l2: Math.round(80000 + rand4() * 200000),
+  l3: Math.round(200000 + rand4() * 500000),
+}))
+
+// ============================
+// CHAT
+// ============================
+
+const INITIAL_MESSAGES = [
+  {role:'assistant', content:'Can currently only process one prompt, NEEDS FURTHUR IMPLEMENTATION TO SUPPORT MULTIPLE PROMPTS.'}
+]
+
+let messages = [...INITIAL_MESSAGES]
+let isAnalyzing = false
+
+function renderMessages() {
+  const container = document.getElementById('chat-messages')
+  container.innerHTML = ''
+  messages.forEach(msg => {
+    const wrapper = document.createElement('div')
+    wrapper.style.cssText = 'display:flex; flex-direction:column; gap:5px;'
+
+    const labelRow = document.createElement('div')
+    labelRow.style.cssText = 'display:flex; align-items:center; gap:5px;'
+
+    if (msg.role === 'user') {
+      labelRow.innerHTML = `
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#6b6b80" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        <span style="font-size:10px; font-family:'JetBrains Mono',monospace; text-transform:uppercase; color:#6b6b80;">prompt</span>`
+    } else {
+      labelRow.innerHTML = `
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+        <span style="font-size:10px; font-family:'JetBrains Mono',monospace; text-transform:uppercase; color:#6b6b80;">response</span>`
+    }
+
+    const bubble = document.createElement('div')
+    bubble.style.cssText = `border-radius:8px; padding:8px 12px; font-size:11px; line-height:1.6; ${
+      msg.role === 'user'
+        ? 'background:#1a1a26; color:#c4c4d4; border:1px solid #2a2a3a;'
+        : 'background:rgba(34,197,94,0.04); color:#e4e4ed; border:1px solid rgba(34,197,94,0.1);'
+    }`
+    bubble.textContent = msg.content
+
+    wrapper.appendChild(labelRow)
+    wrapper.appendChild(bubble)
+    container.appendChild(wrapper)
+  })
+
+  if (isAnalyzing) {
+    const loader = document.createElement('div')
+    loader.style.cssText = 'display:flex; align-items:center; gap:8px; padding:6px 8px;'
+    loader.innerHTML = `
+      <svg style="animation:spin 1s linear infinite; color:#22c55e;" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+      <span style="font-size:10px; font-family:'JetBrains Mono',monospace; color:#22c55e;">Generating...</span>`
+    container.appendChild(loader)
+  }
+
+  container.scrollTop = container.scrollHeight
+  document.getElementById('msg-count').textContent = messages.length + ' messages'
+}
+/*
+What we need to send a msg to the backend:
+- The prompt text (already have in `text`)
+- Selected model
+- Amount of tokens to generate
+- Papi events
+*/
+
+async function sendMessage(e) {
+  e.preventDefault()
+
+  // Get inputs
+  const input = document.getElementById('chat-input')
+  const text = input.value.trim()
+  const modelPath = modelPaths.get(document.getElementById('selected-model-label').textContent)
+  console.log('Selected model path:', modelPath)
+  const events = Array.from(activeCounters).map(event => String(event))
+  console.log('Selected PAPI events:', events)
+
+  // Validation
+  if (!text) {
+    alert('Please enter a prompt')
+    return
+  }
+  if (!modelPath) {
+    alert('Please select a model')
+    return
+  }
+  if (events.length === 0) {
+    alert('Please select at least one PAPI event')
+    return
+  }
+
+  // Update UI - show user message and loading state
+  messages.push({ role: 'user', content: text })
+  input.value = ''
+  isAnalyzing = true
+  renderMessages()
+  document.getElementById('analyzing-indicator').style.display = 'flex'
+
+  try {
+    const response = await fetch(`${API_URL}/profile`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model_path: modelPath,
+        events: events,
+        prompt: text,
+        n_predict: parseInt(document.getElementById('tokens-to-generate').value)
+      })
+    })
+
+    const result = await response.json()
+
+    if (result.success) {
+      lastProfilingOutput = result.stdout
+      messages.push({ role: 'assistant', content: result.stdout || 'Profiling complete.' })
+    } else {
+      messages.push({ role: 'assistant', content: `Error (exit code: ${result.returncode}):\n${result.stderr || result.stdout || 'Unknown error'}` })
+    }
+
+  } catch (error) {
+    messages.push({ role: 'assistant', content: `Error: ${error.message}` })
+  } finally {
+    // Always runs whether success or error - clean up loading state
+    isAnalyzing = false
+    renderMessages()
+    updateStatusBar()
+    document.getElementById('analyzing-indicator').style.display = 'none'
+  }
+}
+
+function sendMessageOld(e) {
+
+  // Frontend validation
+  e.preventDefault()
+
+  //Get the prompt text
+  const input = document.getElementById('chat-input')
+  const text = input.value.trim()
+  if (!text) alert('Please enter a prompt');
+
+
+  messages.push({role:'user', content:text})
+  input.value = ''
+  isAnalyzing = true //Should wait until we get response
+  renderMessages()
+  //updateStatusBar() //Maybe not? or need data from backend for this
+  document.getElementById('analyzing-indicator').style.display = 'flex'
+
+  setTimeout(() => {
+    messages.push({role:'assistant', content:'Processing your query through the model. The profiling data from this inference run is now available in the analysis panels. Layer execution times and cache metrics have been updated.'})
+    isAnalyzing = false
+    renderMessages()
+    updateStatusBar()
+    document.getElementById('analyzing-indicator').style.display = 'none'
+  }, 1500)
+}
+
+function updateStatusBar() {
+  const el = document.getElementById('status-indicator')
+  if (isAnalyzing) {
+    el.innerHTML = `
+      <span style="position:relative; display:inline-flex; width:6px; height:6px;">
+        <span style="position:absolute; inset:0; border-radius:50%; background:#22c55e; opacity:0.75; animation:ping 1s cubic-bezier(0,0,0.2,1) infinite;"></span>
+        <span style="position:relative; border-radius:50%; width:6px; height:6px; background:#22c55e;"></span>
+      </span>
+      <span style="color:#22c55e; font-weight:600; text-transform:uppercase; letter-spacing:0.06em;">Analysis Ongoing</span>`
+  } else {
+    el.innerHTML = `
+      <span style="display:inline-flex; border-radius:50%; width:6px; height:6px; background:#22c55e;"></span>
+      <span style="color:#6b6b80;">Ready</span>`
+  }
+}
+
+// ============================
+// DROPDOWNS
+// ============================
+
+function toggleDropdown(id) {
+  // Close others
+  document.querySelectorAll('.dropdown-content').forEach(el => {
+    if (el.id !== id) el.classList.remove('open')
+  })
+  document.getElementById(id).classList.toggle('open')
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.dropdown')) {
+    document.querySelectorAll('.dropdown-content').forEach(el => el.classList.remove('open'))
+  }
+})
+
+//Storing model paths
+const modelPaths = new Map()
+// Load models on page load
+async function loadModels() {
+  try {
+    const response = await fetch(`${API_URL}/models`);
+    const models = await response.json();
+
+    const dropdown = document.getElementById('dd-model');
+
+    // remove existing buttons but keep label
+    dropdown.querySelectorAll('.dropdown-item').forEach(el => el.remove());
+
+    if (models.length === 0) {
+      const msg = document.createElement('div');
+      msg.textContent = "No models found";
+      dropdown.appendChild(msg);
+      return;
+    }
+
+    //Might need to be adjusted depending on what to send back to API
+    //Clean up the model display names 
+    models.forEach(model => {
+      let path = model.path
+      let slash_index = model.display_name.lastIndexOf('/')
+      model.display_name = slash_index !== -1 ? model.display_name.slice(slash_index + 1) : model.display_name
+
+      let dot_index = model.display_name.lastIndexOf('.')
+      model.display_name = dot_index !== -1 ? model.display_name.slice(0, dot_index) : model.display_name
+
+      //Store in hashmap for later retrieval when sending message to backend
+      modelPaths.set(model.display_name, path)
+    })
+
+    models.forEach(model => {
+      const button = document.createElement('button');
+
+      button.className = "dropdown-item";
+      button.textContent = model.display_name;
+
+      button.onclick = () => selectModel(button, model.display_name);
+
+      dropdown.appendChild(button);
+    });
+
+  } catch (error) {
+    console.error('Error loading models:', error);
+    alert(`Error loading models: ${error.message || error}`);
+  }
+}
+
+//For displaying selected model
+function selectModel(btn, name) {
+  document.querySelectorAll('#dd-model .dropdown-item').forEach(el => {
+    el.style.color = '#e4e4ed'
+    el.style.fontWeight = 'normal'
+  })
+  btn.style.color = '#22c55e'
+  btn.style.fontWeight = '500'
+  document.getElementById('selected-model-label').textContent = name
+  document.getElementById('dd-model').classList.remove('open')
+}
+
+// Load events 
+async function loadEvents() {
+    try {
+        const response = await fetch(`${API_URL}/events`);
+        const events = await response.json();
+
+        const dropdown = document.getElementById('dd-counters');
+
+        if (events.length === 0) {
+          const msg = document.createElement('div');
+          msg.textContent = "No events found";
+          dropdown.appendChild(msg);
+          return;
         }
+        //Might need to be adjusted depending on what to send back to API
+        //Clean up the event display names 
+        events.forEach(event => {
+          const button = document.createElement('button');
 
-        // Load events on page load
-        async function loadEvents() {
-            try {
-                const response = await fetch(`${API_URL}/events`);
-                const events = await response.json();
+          button.className = "dropdown-item";
+          button.dataset.enabled = 'false';
+          button.textContent = event.name;
+          button.onclick = () => toggleCounter(button, event.name);
+          
+          const span = document.createElement('span');
+          span.className = 'counter-dot';
+          span.style.cssText = 'width:8px;height:8px;border-radius:50%;background:rgba(107,107,128,0.3);flex-shrink:0; margin-right:8px;';
 
-                const container = document.getElementById('events');
-                container.innerHTML = '';
+          
+          button.appendChild(span);
+          dropdown.appendChild(button);
 
-                events.forEach(event => {
-                    const div = document.createElement('div');
-                    div.className = 'checkbox-item';
 
-                    const checkbox = document.createElement('input');
-                    checkbox.type = 'checkbox';
-                    checkbox.id = event.name;
-                    checkbox.value = event.name;
-                    checkbox.onchange = validateEventSelection;
+        });
+    
 
-                    const label = document.createElement('label');
-                    label.htmlFor = event.name;
-                    label.innerHTML = `<span class="event-name">${event.name}</span><br><span class="event-desc">${event.description}</span>`;
+    } catch (error) {
+        console.error('Error loading events:', error);
+        alert(`Error loading events: ${error.message || error}`);
+    }
+}
 
-                    div.appendChild(checkbox);
-                    div.appendChild(label);
-                    container.appendChild(div);
-                });
-            } catch (error) {
-                console.error('Error loading events:', error);
-            }
+//Used to keep track of active counters, used to ensure not to many are selected
+const activeCounters = new Set();
+
+//triggerd when clicking on a counter in dropdown
+function toggleCounter(btn, id) {
+  const dot = btn.querySelector('.counter-dot')
+  const enabled = btn.dataset.enabled === 'true'
+  if (!enabled) 
+  {
+    activeCounters.add(id)
+    btn.dataset.enabled = (!enabled).toString()
+  } 
+  else 
+  {
+    activeCounters.delete(id)
+    btn.dataset.enabled = 'false'
+  }
+  dot.style.background = !enabled ? '#22c55e' : 'rgba(107,107,128,0.3)'
+}
+
+// ============================
+// VIEW MODE
+// ============================
+
+let currentView = 'roofline'
+
+function setViewMode(mode, btn) {
+  currentView = mode
+
+  // Update buttons
+  document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'))
+  btn.classList.add('active')
+
+  // Update views
+  document.querySelectorAll('.viz-view').forEach(v => v.classList.remove('active'))
+  document.getElementById('view-' + mode).classList.add('active')
+
+  // Update title
+  const titles = {roofline:'Roofline Model', heatmap:'Layer Execution Heatmap', kvcache:'KV-Cache Utilization'}
+  document.getElementById('viz-title').textContent = titles[mode]
+
+  if (mode === 'kvcache' && !kvCacheChartInited) {
+    initKVCacheChart()
+  }
+}
+
+// ============================
+// METRIC VIEW
+// ============================
+
+function setMetricView(view, btn) {
+  document.querySelectorAll('.metric-btn').forEach(b => b.classList.remove('active'))
+  btn.classList.add('active')
+  document.querySelectorAll('.metric-view').forEach(v => v.style.display = 'none')
+  document.getElementById('metric-' + view).style.display = 'flex'
+}
+
+// ============================
+// CHARTS
+// ============================
+
+const chartDefaults = {
+  backgroundColor: '#12121a',
+  color: '#6b6b80',
+}
+
+Chart.defaults.color = '#6b6b80'
+Chart.defaults.font.family = "'JetBrains Mono', monospace"
+Chart.defaults.font.size = 10
+
+// --- Roofline Chart ---
+function initRooflineChart(operationPoints) {
+  const ctx = document.getElementById('roofline-chart').getContext('2d');
+  return new Chart(ctx, {
+    type: 'scatter',
+    data: {
+      datasets: [
+        {
+          type: 'line',
+          label: 'Roofline',
+          data: rooflineLineData,
+          borderColor: '#ef4444',
+          backgroundColor: 'transparent',
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0,
+          order: 2,
+        },
+        {
+          type: 'scatter',
+          label: 'Operations',
+          data: operationPoints.map(p => ({x: p.x, y: p.y, name: p.name, layer: p.layer})),
+          pointBackgroundColor: operationPoints.map(p => layerColors[p.layer] || '#22c55e'),
+          pointBorderColor: operationPoints.map(p => layerColors[p.layer] || '#22c55e'),
+          pointRadius: 7,
+          pointHoverRadius: 9,
+          order: 1,
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          filter: (item) => item.datasetIndex === 1,
+          callbacks: {
+            title: (items) => items[0]?.raw?.name || '',
+            label: (item) => [
+              `OI: ${item.raw.x.toFixed(2)} FLOP/Byte`,
+              `Perf: ${item.raw.y.toFixed(1)} GFLOP/s`
+            ],
+          },
+          backgroundColor: '#12121a',
+          borderColor: '#2a2a3a',
+          borderWidth: 1,
+          titleColor: '#e4e4ed',
+          bodyColor: '#6b6b80',
+          padding: 10,
+          titleFont: {size:11, weight:'600'},
+        },
+      },
+      scales: {
+        x: {
+          type: 'logarithmic',
+          min: 0.0625,
+          max: 128,
+          grid: { color: '#2a2a3a' },
+          ticks: { color: '#6b6b80', font: {size:9} },
+          title: {
+            display: true,
+            text: 'Operational Intensity (FLOP/Byte)',
+            color: '#6b6b80',
+            font: {size:9},
+          },
+        },
+        y: {
+          type: 'logarithmic',
+          min: 1,
+          max: 200,
+          grid: { color: '#2a2a3a' },
+          ticks: { color: '#6b6b80', font: {size:9} },
+          title: {
+            display: true,
+            text: 'GFLOP/s',
+            color: '#6b6b80',
+            font: {size:9},
+          },
         }
+      }
+    }
+  })
+}
 
-        // Validate event selection (max 4)
-        function validateEventSelection() {
-            const checkboxes = document.querySelectorAll('#events input[type="checkbox"]');
-            const checked = Array.from(checkboxes).filter(cb => cb.checked);
-            const warning = document.getElementById('event-warning');
 
-            if (checked.length > 4) {
-                warning.style.display = 'block';
-                this.checked = false;
-            } else {
-                warning.style.display = 'none';
-            }
+let rooflineChart = null; 
+
+async function generateRoofline() {
+  const canvas = document.getElementById('roofline-chart');
+  const generate_roofline = document.querySelector('#view-roofline .generate-roofline');
+  const btn = generate_roofline.querySelector('.btn-generate-roofline');
+
+  btn.textContent = '⬡ Regenerate Roofline';
+  canvas.style.display = 'block';
+  generate_roofline.style.display = 'flex';
+
+  try {
+    const response = await fetch(`${API_URL}/roofline_data`);
+    const data = await response.json();
+
+    const hardwareKey = 'i7-1185G7';
+    const points = data[hardwareKey];
+    const operationPoints = points.map(p => ({
+      x: p.arithmetic_intensity,
+      y: p.performance_gflops,
+      name: p.label,
+      layer: p.label.includes('optimized') ? 'compute' : 'attn',
+    }));
+
+    // Destroy previous chart instance if it exists
+    if (rooflineChart) {
+      rooflineChart.destroy();
+      rooflineChart = null;
+    }
+
+    rooflineChart = initRooflineChart(operationPoints);
+
+  } catch (err) {
+    console.error('Failed to load roofline data:', err);
+    btn.textContent = '⬡ Retry';
+  }
+}
+
+// --- KV-Cache Chart ---
+let kvCacheChartInited = false
+function initKVCacheChart() {
+  kvCacheChartInited = true
+  const ctx = document.getElementById('kvcache-chart').getContext('2d')
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: kvCacheData.map(d => d.layer),
+      datasets: [{
+        label: 'Utilization %',
+        data: kvCacheData.map(d => d.utilization),
+        borderColor: '#22c55e',
+        backgroundColor: 'rgba(34,197,94,0.08)',
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: true,
+        tension: 0.4,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#12121a',
+          borderColor: '#2a2a3a',
+          borderWidth: 1,
+          titleColor: '#e4e4ed',
+          bodyColor: '#22c55e',
+          callbacks: {
+            label: (item) => `${item.raw.toFixed(1)}%`
+          }
         }
-
-        // Run profiling
-        async function runProfile() {
-            const modelPath = document.getElementById('model').value;
-            const prompt = document.getElementById('prompt').value;
-            const nPredict = parseInt(document.getElementById('n_predict').value);
-
-            const checkboxes = document.querySelectorAll('#events input[type="checkbox"]:checked');
-            const events = Array.from(checkboxes).map(cb => cb.value);
-
-            // Validation
-            if (!modelPath) {
-                alert('Please select a model');
-                return;
-            }
-
-            if (events.length === 0) {
-                alert('Please select at least one PAPI event');
-                return;
-            }
-
-            if (!prompt.trim()) {
-                alert('Please enter a prompt');
-                return;
-            }
-
-            // Show loading
-            document.getElementById('loading').classList.add('show');
-            document.getElementById('output').classList.remove('show');
-            document.getElementById('run-btn').disabled = true;
-
-            try {
-                const response = await fetch(`${API_URL}/profile`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        model_path: modelPath,
-                        events: events,
-                        prompt: prompt,
-                        n_predict: nPredict
-                    })
-                });
-
-                const result = await response.json();
-
-                // Hide loading
-                document.getElementById('loading').classList.remove('show');
-                document.getElementById('run-btn').disabled = false;
-
-                // Show output
-                const outputDiv = document.getElementById('output');
-                outputDiv.classList.add('show');
-
-                if (result.success) {
-                    outputDiv.className = 'output show success';
-                    outputDiv.innerHTML = `
-                        <h3>Profiling Results</h3>
-                        <pre>${result.stdout || 'No output'}</pre>
-                        ${result.stderr ? `<h3>Stderr</h3><pre>${result.stderr}</pre>` : ''}
-                    `;
-                } else {
-                    outputDiv.className = 'output show error';
-                    outputDiv.innerHTML = `
-                        <h3>Error (exit code: ${result.returncode})</h3>
-                        <pre>${result.stderr || result.stdout || 'Unknown error'}</pre>
-                    `;
-                }
-            } catch (error) {
-                document.getElementById('loading').classList.remove('show');
-                document.getElementById('run-btn').disabled = false;
-
-                const outputDiv = document.getElementById('output');
-                outputDiv.className = 'output show error';
-                outputDiv.classList.add('show');
-                outputDiv.innerHTML = `
-                    <h3>Error</h3>
-                    <pre>${error.message}</pre>
-                `;
-            }
+      },
+      scales: {
+        x: {
+          grid: { color: '#2a2a3a' },
+          ticks: { color: '#6b6b80', font: {size:9} },
+          title: { display: true, text: 'Layer', color: '#6b6b80', font: {size:9} },
+        },
+        y: {
+          grid: { color: '#2a2a3a' },
+          ticks: { color: '#6b6b80', font: {size:9} },
+          title: { display: true, text: 'Utilization %', color: '#6b6b80', font: {size:9} },
         }
+      }
+    }
+  })
+}
 
-        // Load hardware profiles
-        async function loadHardware() {
-            try {
-                const response = await fetch(`${API_URL}/hardware`);
-                const hardware = await response.json();
-
-                const select = document.getElementById('hardware');
-                select.innerHTML = '';
-
-                hardware.forEach(hw => {
-                    const option = document.createElement('option');
-                    option.value = hw.name;
-                    option.textContent = hw.label;
-                    select.appendChild(option);
-                });
-            } catch (error) {
-                console.error('Error loading hardware:', error);
-                document.getElementById('hardware').innerHTML = '<option value="">Error loading hardware</option>';
-            }
+// --- Layer Exec Chart ---
+function initLayerExecChart() {
+  const ctx = document.getElementById('layer-exec-chart').getContext('2d')
+  const top16 = layerExecData.slice(0, 16)
+  new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: top16.map(d => d.layer),
+      datasets: [{
+        data: top16.map(d => d.time),
+        backgroundColor: top16.map(d => d.type === 'attn' ? 'rgba(239,68,68,0.7)' : 'rgba(34,197,94,0.7)'),
+        borderRadius: 2,
+        borderSkipped: false,
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#12121a',
+          borderColor: '#2a2a3a',
+          borderWidth: 1,
+          titleColor: '#e4e4ed',
+          bodyColor: '#6b6b80',
+          callbacks: {
+            title: (items) => `Layer ${items[0].label}`,
+            label: (item) => `${item.raw} us`,
+          }
         }
-
-        // Run analysis
-        async function runAnalysis() {
-            // TODO: Remove this check when integrating with live profiling data
-            // Currently we show hardcoded examples regardless of profiling output
-
-            const hardware = document.getElementById('hardware').value;
-            const style = document.getElementById('plot-style').value;
-
-            if (!hardware) {
-                alert('Please select a hardware profile');
-                return;
-            }
-
-            // Show loading
-            document.getElementById('analysis-loading').classList.add('show');
-            document.getElementById('analysis-output').classList.remove('show');
-
-            try {
-                const response = await fetch(`${API_URL}/analyze`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        profiling_output: lastProfilingOutput || "dummy",  // TODO: Use actual PAPI output
-                        hardware: hardware,
-                        style: style
-                    })
-                });
-
-                const result = await response.json();
-
-                // Hide loading
-                document.getElementById('analysis-loading').classList.remove('show');
-
-                if (result.success) {
-                    const outputDiv = document.getElementById('analysis-output');
-                    outputDiv.className = 'output show success';
-
-                    const metrics = result.metrics;
-
-                    // Display kernel information
-                    let kernelsHtml = '<div style="background: white; padding: 15px; border-radius: 6px; margin-bottom: 15px;">';
-                    kernelsHtml += '<h4 style="margin-bottom: 10px;">Example Kernels Plotted:</h4>';
-                    kernelsHtml += '<table style="width: 100%; border-collapse: collapse;">';
-                    kernelsHtml += '<tr style="border-bottom: 1px solid #ddd; font-weight: bold;"><td>Kernel</td><td>AI (FLOP/Byte)</td><td>Perf (GFLOP/s)</td></tr>';
-
-                    metrics.kernels.forEach(k => {
-                        kernelsHtml += `<tr style="border-bottom: 1px solid #eee;">
-                            <td style="padding: 8px;">${k.label}</td>
-                            <td style="padding: 8px;">${k.ai.toFixed(4)}</td>
-                            <td style="padding: 8px;">${k.perf_gflops.toFixed(2)}</td>
-                        </tr>`;
-                    });
-
-                    kernelsHtml += '</table></div>';
-
-                    outputDiv.innerHTML = `
-                        <h3>Roofline Analysis</h3>
-                        <div style="background: #fffbea; border-left: 4px solid #f39c12; padding: 12px; margin-bottom: 15px; border-radius: 4px;">
-                            <strong>Note:</strong> ${metrics.note}
-                        </div>
-                        ${kernelsHtml}
-                        <h3>Roofline Plot</h3>
-                        <img src="${API_URL}${result.plot_url}" style="width: 100%; border-radius: 6px; margin-top: 10px;" alt="Roofline Plot">
-                        <p style="margin-top: 10px; color: #666; font-size: 0.9em;">
-                            Hardware: ${metrics.hardware} | Style: ${metrics.style}
-                        </p>
-                    `;
-                } else {
-                    const outputDiv = document.getElementById('analysis-output');
-                    outputDiv.className = 'output show error';
-                    outputDiv.innerHTML = `
-                        <h3>Analysis Failed</h3>
-                        <pre>${JSON.stringify(result, null, 2)}</pre>
-                    `;
-                }
-            } catch (error) {
-                document.getElementById('analysis-loading').classList.remove('show');
-
-                const outputDiv = document.getElementById('analysis-output');
-                outputDiv.className = 'output show error';
-                outputDiv.classList.add('show');
-                outputDiv.innerHTML = `
-                    <h3>Error</h3>
-                    <pre>${error.message}</pre>
-                `;
-            }
+      },
+      scales: {
+        x: {
+          grid: { color: '#2a2a3a' },
+          ticks: { color: '#6b6b80', font: {size:9} },
+          title: { display: true, text: 'us', color: '#6b6b80', font: {size:9} },
+        },
+        y: {
+          grid: { display: false },
+          ticks: { color: '#6b6b80', font: {size:9} },
         }
+      }
+    }
+  })
+}
 
-        // Update runProfile to save output and show analysis section
-        const originalRunProfile = runProfile;
-        runProfile = async function() {
-            const modelPath = document.getElementById('model').value;
-            const prompt = document.getElementById('prompt').value;
-            const nPredict = parseInt(document.getElementById('n_predict').value);
+// ============================
+// TABLE RENDERS
+// ============================
 
-            const checkboxes = document.querySelectorAll('#events input[type="checkbox"]:checked');
-            const events = Array.from(checkboxes).map(cb => cb.value);
+function renderHeatmap() {
+  const grid = document.getElementById('heatmap-grid')
+  const maxTime = Math.max(...heatmapLayers.map(l => l.total))
 
-            // Validation
-            if (!modelPath) {
-                alert('Please select a model');
-                return;
-            }
+  grid.innerHTML = `
+    <div class="heatmap-header">Layer</div>
+    <div class="heatmap-header">Attention</div>
+    <div class="heatmap-header">FFN</div>
+    <div class="heatmap-header">Norm</div>
+    <div class="heatmap-header" style="text-align:right;">Total</div>
+  `
 
-            if (events.length === 0) {
-                alert('Please select at least one PAPI event');
-                return;
-            }
+  heatmapLayers.forEach(layer => {
+    const aOpacity = (layer.attn / maxTime) * 0.8 + 0.1
+    const fOpacity = (layer.ffn / maxTime) * 0.8 + 0.1
+    const nOpacity = (layer.norm / maxTime) * 0.8 + 0.1
 
-            if (!prompt.trim()) {
-                alert('Please enter a prompt');
-                return;
-            }
+    grid.innerHTML += `
+      <div class="heatmap-cell-plain">${layer.layer}</div>
+      <div style="padding:4px 8px; font-size:10px; font-family:'JetBrains Mono',monospace; color:#e4e4ed; background:rgba(239,68,68,${aOpacity});">${layer.attn.toFixed(0)}us</div>
+      <div style="padding:4px 8px; font-size:10px; font-family:'JetBrains Mono',monospace; color:#e4e4ed; background:rgba(34,197,94,${fOpacity});">${layer.ffn.toFixed(0)}us</div>
+      <div style="padding:4px 8px; font-size:10px; font-family:'JetBrains Mono',monospace; color:#e4e4ed; background:rgba(59,130,246,${nOpacity});">${layer.norm.toFixed(0)}us</div>
+      <div class="heatmap-cell-total">${layer.total.toFixed(0)}us</div>
+    `
+  })
+}
 
-            // Show loading
-            document.getElementById('loading').classList.add('show');
-            document.getElementById('output').classList.remove('show');
-            document.getElementById('run-btn').disabled = true;
+function renderKVGrid() {
+  const grid = document.getElementById('kv-grid')
+  grid.innerHTML = `
+    <div class="kv-grid-header">Layer</div>
+    <div class="kv-grid-header">Key (KB)</div>
+    <div class="kv-grid-header">Value (KB)</div>
+    <div class="kv-grid-header">Util %</div>
+  `
+  kvCacheData.slice(0, 16).forEach(row => {
+    const color = row.utilization > 80 ? '#ef4444' : row.utilization > 60 ? '#f59e0b' : '#22c55e'
+    grid.innerHTML += `
+      <div>${row.layer}</div>
+      <div>${row.keySize}</div>
+      <div>${row.valueSize}</div>
+      <div style="color:${color};">${row.utilization.toFixed(1)}%</div>
+    `
+  })
+}
 
-            try {
-                const response = await fetch(`${API_URL}/profile`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        model_path: modelPath,
-                        events: events,
-                        prompt: prompt,
-                        n_predict: nPredict
-                    })
-                });
+function renderLayerExecTable() {
+  const tbody = document.getElementById('layer-exec-table')
+  layerExecData.slice(0, 12).forEach(row => {
+    const tr = document.createElement('tr')
+    tr.style.cssText = 'border-bottom:1px solid rgba(42,42,58,0.5);'
+    tr.innerHTML = `
+      <td style="padding:4px 8px; color:#e4e4ed;">${row.layer}</td>
+      <td style="padding:4px 8px; text-align:right; color:#e4e4ed;">${row.time}</td>
+      <td style="padding:4px 8px; text-align:right;">
+        <span style="padding:2px 5px; border-radius:3px; font-size:9px; ${
+          row.type === 'attn'
+            ? 'background:rgba(239,68,68,0.1); color:#ef4444;'
+            : 'background:rgba(34,197,94,0.1); color:#22c55e;'
+        }">${row.type}</span>
+      </td>
+    `
+    tbody.appendChild(tr)
+  })
+}
 
-                const result = await response.json();
+function renderCacheMissTable() {
+  const tbody = document.getElementById('cache-miss-table')
+  cacheMissData.forEach(row => {
+    const color = row.percent > 50 ? '#ef4444' : row.percent > 20 ? '#f59e0b' : '#22c55e'
+    const tr = document.createElement('tr')
+    tr.style.cssText = 'border-bottom:1px solid rgba(42,42,58,0.5);'
+    tr.innerHTML = `
+      <td style="padding:7px 8px; color:#e4e4ed; font-weight:600;">${row.cache}</td>
+      <td style="padding:7px 8px; text-align:right; color:#e4e4ed;">${row.amount}</td>
+      <td style="padding:7px 8px; text-align:right; color:${color};">${row.percent}%</td>
+      <td style="padding:7px 8px;">
+        <div class="miss-bar-track">
+          <div class="miss-bar-fill" style="width:${Math.min(row.percent,100)}%; background:${row.color};"></div>
+        </div>
+      </td>
+    `
+    tbody.appendChild(tr)
+  })
+}
 
-                // Hide loading
-                document.getElementById('loading').classList.remove('show');
-                document.getElementById('run-btn').disabled = false;
+function renderPerLayerMetrics() {
+  const flopsEl = document.getElementById('metric-flops')
+  const footEl = document.getElementById('metric-footprint')
+  const bwEl = document.getElementById('metric-bandwidth')
+  const maxFlops = 25000, maxFP = 50, maxBW = 20
 
-                // Show output
-                const outputDiv = document.getElementById('output');
-                outputDiv.classList.add('show');
+  perLayerData.slice(0, 20).forEach(row => {
+    const flops = Math.round(row.l1 * 0.1 + row.l2 * 0.05 + row.l3 * 0.02)
+    const footprint = Math.round((row.l1 + row.l2 + row.l3) * 64 / 1024 / 1024)
+    const bw = (row.l1 * 64 / 1024 / 1024 / 0.001).toFixed(1)
 
-                if (result.success) {
-                    // Save profiling output for future integration
-                    // TODO: Use this when integrating with live PAPI data
-                    lastProfilingOutput = result.stdout;
+    function mkRow(val, max, color, label) {
+      const pct = Math.min((val/max)*100, 100)
+      return `<div style="display:flex; align-items:center; gap:6px;">
+        <span style="font-size:9px; font-family:'JetBrains Mono',monospace; color:#6b6b80; width:14px; text-align:right;">${row.layer}</span>
+        <div class="mini-bar-track"><div class="mini-bar-fill" style="width:${pct}%; background:${color};"></div></div>
+        <span style="font-size:9px; font-family:'JetBrains Mono',monospace; color:#e4e4ed; width:44px; text-align:right;">${label}</span>
+      </div>`
+    }
 
-                    outputDiv.className = 'output show success';
-                    outputDiv.innerHTML = `
-                        <h3>Profiling Results</h3>
-                        <pre>${result.stdout || 'No output'}</pre>
-                        ${result.stderr ? `<h3>Stderr</h3><pre>${result.stderr}</pre>` : ''}
-                    `;
+    flopsEl.innerHTML += mkRow(flops, maxFlops, 'rgba(34,197,94,0.6)', `${(flops/1000).toFixed(1)}K`)
+    footEl.innerHTML += mkRow(footprint, maxFP, 'rgba(59,130,246,0.6)', `${footprint}MB`)
+    bwEl.innerHTML += mkRow(parseFloat(bw), maxBW, 'rgba(245,158,11,0.6)', `${bw}GB/s`)
+  })
+}
 
-                    // Load and display the CSV file
-                    loadAndDisplayCSV();
-                } else {
-                    outputDiv.className = 'output show error';
-                    outputDiv.innerHTML = `
-                        <h3>Error (exit code: ${result.returncode})</h3>
-                        <pre>${result.stderr || result.stdout || 'Unknown error'}</pre>
-                    `;
-                }
-            } catch (error) {
-                document.getElementById('loading').classList.remove('show');
-                document.getElementById('run-btn').disabled = false;
+// ============================
+// INIT
+// ============================
+async function get_cpu_info() {
+  try {
+    const response = await fetch(`${API_URL}/cpu_info`);
+    const data = await response.json();
+    const cpu_label = document.getElementById('CPU_INFO');
+    const arch_label = document.getElementById('ARCH_INFO');
+    console.log('CPU Info:', data);
+    cpu_label.textContent = `${data.model_name}`;
+    arch_label.textContent = `${data.architecture}`;
+    
+  } catch (error) {
+    console.error('Error fetching CPU info:', error);
+    return null;
+  }
+}
 
-                const outputDiv = document.getElementById('output');
-                outputDiv.className = 'output show error';
-                outputDiv.classList.add('show');
-                outputDiv.innerHTML = `
-                    <h3>Error</h3>
-                    <pre>${error.message}</pre>
-                `;
-            }
-        };
-
-        // Load and display raw CSV after profiling
-        async function loadAndDisplayCSV() {
-            try {
-                const response = await fetch(`${API_URL}/measurements.csv`);
-                const csvText = await response.text();
-
-                const csvOutput = document.getElementById('csv-output');
-                csvOutput.className = 'output show success';
-                csvOutput.innerHTML = `
-                    <h3>Measurements CSV</h3>
-                    <pre style="white-space: pre-wrap; word-wrap: break-word;">${csvText}</pre>
-                `;
-            } catch (error) {
-                const csvOutput = document.getElementById('csv-output');
-                csvOutput.className = 'output show error';
-                csvOutput.innerHTML = `
-                    <h3>Error Loading CSV</h3>
-                    <pre>${error.message}</pre>
-                `;
-            }
-        }
-
-        // Initialize on page load
-        window.onload = () => {
-            loadModels();
-            loadEvents();
-            loadHardware();
-        };
-    </script>
+document.addEventListener('DOMContentLoaded', () => {
+  renderMessages()
+  renderHeatmap()
+  renderKVGrid()
+  renderLayerExecTable()
+  renderCacheMissTable()
+  renderPerLayerMetrics()
+  initLayerExecChart()
+  loadModels()
+  loadEvents()
+  get_cpu_info()
+})
+</script>
 </body>
-
 </html>

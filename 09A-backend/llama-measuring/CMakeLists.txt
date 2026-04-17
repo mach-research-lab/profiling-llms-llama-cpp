@@ -3,13 +3,13 @@ add_library(energy-measure STATIC energy-measure.cpp)
 target_compile_features(energy-measure PRIVATE cxx_std_17)
 
 # ── llama-papi ──────────────────────────────────────────────────────────────
-find_package(PostgreSQL REQUIRED)
+find_package(SQLite3 REQUIRED)
 set(TARGET llama-papi)
 add_executable(${TARGET} llama-papi.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
-target_include_directories(${TARGET} PRIVATE /usr/local/include ${PostgreSQL_INCLUDE_DIRS})
-target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} papi /usr/local/lib/libpapi.so ${PostgreSQL_LIBRARIES})
+target_include_directories(${TARGET} PRIVATE /usr/local/include)
+target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} papi /usr/local/lib/libpapi.so SQLite::SQLite3)
 
 # ── kv-measure ───────────────────────────────────────────────────────────────
 set(TARGET kv-measure)

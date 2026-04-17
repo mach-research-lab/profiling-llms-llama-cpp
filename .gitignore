@@ -4,6 +4,8 @@
 
 #Ignore all JSON files
 *.json
+#Ignore SQLite database files
+*.db
 
 run_all_results*/
 #Ignore build artifacts
@@ -19,5 +21,10 @@ build*/
 .venv/
 .devops/
 .gemini/
+
+models/*
+!models/README.md
+!models/download_model.py
+!models/.gitignore
 
 

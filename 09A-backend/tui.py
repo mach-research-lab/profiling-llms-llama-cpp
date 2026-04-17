@@ -22,6 +22,30 @@ MODELS_ROOT = os.path.join(os.path.expanduser("~"), "shared/models")
 
 AVAILABLE_EVENTS = get_available_events()
 
+#Used for selecting storage type (database, file, or both)
+def select_storage_type():
+    storage_types = {
+        "1": ("file", "Save to CSV file only"),
+        "2": ("database", "Save to SQLite database only"),
+        "3": ("both", "Save to both CSV file and database"),
+    }
+
+    print("\nSelect storage type:")
+    for key, (_, desc) in storage_types.items():
+        print(f"  {key}. {desc}")
+
+    while True:
+        raw = input("> ").strip()
+        if raw not in storage_types:
+            print("Invalid choice. Enter 1, 2, or 3.")
+            continue
+
+        key, desc = storage_types[raw]
+        print(f"\n  ✓ {desc}")
+        confirm = input("Confirm? (y/n): ").strip().lower()
+        if confirm == "y":
+            return key
+
 #Used for selecting run type (PAPI events, energy, KV cache or everything)
 def select_run_type():
     run_types = {
@@ -177,7 +201,7 @@ def check_binary(binary_path):
         return True
 
 #Used for running llama-papi
-def run_single_papi(model_path, events, prompt, n_predict, binary_path):
+def run_single_papi(model_path, events, prompt, n_predict, binary_path, storage_type="file", db_path="profiling_data.db"):
     event_names = [e[0] for e in events]
     events_arg = ",".join(event_names)
 
@@ -192,11 +216,15 @@ def run_single_papi(model_path, events, prompt, n_predict, binary_path):
         "--log-disable",
     ]
 
+    # Add database flags based on storage type
+    if storage_type in ["database", "both"]:
+        cmd.extend(["--use-db", "--db-path", db_path])
+
     print(f"\nRunning: {' '.join(cmd)}\n")
     subprocess.run(cmd, cwd=LLAMA_ROOT)
 
 #Used for running llama-papi in conversation mode
-def run_conversation_papi(model_path, events, prompt, n_predict, binary_path):
+def run_conversation_papi(model_path, events, prompt, n_predict, binary_path, storage_type="file", db_path="profiling_data.db"):
     event_names = [e[0] for e in events]
     events_arg = ",".join(event_names)
 
@@ -211,6 +239,10 @@ def run_conversation_papi(model_path, events, prompt, n_predict, binary_path):
         "--temp", "0",  # fixed temp for consistent measurements
         "--log-disable",
     ]
+
+    # Add database flags based on storage type
+    if storage_type in ["database", "both"]:
+        cmd.extend(["--use-db", "--db-path", db_path])
 
     print(f"\nStarting conversation mode...")
     print(f"Running: {' '.join(cmd)}\n")
@@ -349,7 +381,7 @@ def run_energy(model_path, prompt, n_predict, binary_path):
 
 
 # --------- RUN ALL (Multi-batch with event groups) ---------
-def run_all(model_path, prompt, n_predict, k_cache_type, v_cache_type):
+def run_all(model_path, prompt, n_predict, k_cache_type, v_cache_type, storage_type="file", db_path="profiling_data.db"):
     # Remove existing directory and recreate it fresh
     output_dir = os.path.join(LLAMA_ROOT, "run_all_results")
     if os.path.exists(output_dir):
@@ -379,6 +411,10 @@ def run_all(model_path, prompt, n_predict, k_cache_type, v_cache_type):
             "--temp", "0",  # fixed temp for consistent measurements
             "--log-disable",
         ]
+
+        # Add database flags based on storage type
+        if storage_type in ["database", "both"]:
+            cmd.extend(["--use-db", "--db-path", db_path])
 
         print(f"\nRunning group {i+1}/{len(event_groups)}: {' '.join(cmd)}\n")
         result = subprocess.run(cmd, cwd=LLAMA_ROOT)
@@ -430,8 +466,8 @@ def run_all(model_path, prompt, n_predict, k_cache_type, v_cache_type):
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),
-        "--cache-type-k", cache_type,
-        "--cache-type-v", cache_type,
+        "--cache-type-k", k_cache_type,
+        "--cache-type-v", v_cache_type,
         "--temp", "0",  # fixed temp for consistent measurements
         "--log-disable",
     ]
@@ -459,6 +495,14 @@ def main():
 
     run_type = select_run_type()
     print(run_type)
+
+    # Select storage type for PAPI-based measurements
+    storage_type = "file"  # Default for energy and KV measurements
+    db_path = os.path.join(LLAMA_ROOT, "profiling_data.db")
+
+    if run_type in ["single", "conversation", "all", "TOP-VIEW"]:
+        storage_type = select_storage_type()
+
     #Add path to the correct binary based on the run type
     if run_type == "energy":
         binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-energy")
@@ -508,21 +552,23 @@ def main():
     n_predict = int(raw) if raw.isdigit() else 64
 
     if run_type == "single":
-        run_single_papi(model_path, events, prompt, n_predict, binary_path)
+        run_single_papi(model_path, events, prompt, n_predict, binary_path, storage_type, db_path)
     elif run_type == "kv":
         run_kv_measurement(model_path, prompt, n_predict, k_cache_type, v_cache_type, binary_path)
     elif run_type == "energy":
         run_energy(model_path, prompt, n_predict, binary_path)
     elif run_type == "all":
-        run_all(model_path, prompt, n_predict, k_cache_type, v_cache_type)
+        run_all(model_path, prompt, n_predict, k_cache_type, v_cache_type, storage_type, db_path)
     elif run_type == "conversation":
-        run_conversation_papi(model_path, events, prompt, n_predict, binary_path)
+        run_conversation_papi(model_path, events, prompt, n_predict, binary_path, storage_type, db_path)
     elif run_type == "TOP-VIEW":
         run_top_view_papi(model_path, events, prompt, n_predict, k_cache_type, v_cache_type, binary_path)
     elif run_type == "PHASE-VIEW":
         run_phase_view_papi(model_path, events, prompt, n_predict, binary_path)
     elif run_type == "DECODER-BLOCK-VIEW":
         run_decoder_block_view_papi(model_path, events, prompt, n_predict, binary_path)
+
+   
 
 
 if __name__ == "__main__":
