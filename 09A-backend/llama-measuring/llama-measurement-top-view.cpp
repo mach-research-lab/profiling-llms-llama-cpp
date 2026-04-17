@@ -83,16 +83,26 @@ static inline int64_t get_cpu_time_ns() {
     return (utime + stime) * (1000000000L / ticks_per_sec);
 }
 
-// JSON helper
+// --- JSON helpers ---
+
+// To avoid overwriting already exisiting values
+template <typename T>
+void add_if_missing_json(nlohmann::json& j, const std::string& key, T&& value) {
+    if (!j.contains(key)) {
+        j[key] = std::forward<T>(value);
+    }
+}
 
 void write_energy_accum_json(nlohmann::json json_file, const perf_energy & e, const uint64_t accum[N_DOMAINS]) {
     for (int i = 0; i < N_DOMAINS; i++) {
-        if (e.ok[i])
-            json_file[DOMAIN_NAMES[i]] = energy_to_uj(e, i, accum[i]);
-        else
-            json_file[DOMAIN_NAMES[i]] = "not available";
+        if (e.ok[i]) 
+            add_if_missing_json(json_file, DOMAIN_NAMES[i], energy_to_uj(e, i, accum[i]));
+        else 
+            add_if_missing_json(json_file, DOMAIN_NAMES[i], nullptr);
     }
 }
+
+
 
 // --- ARGUMENT PARSING ---
 
@@ -433,24 +443,27 @@ int main(int argc, char ** argv) {
     }
     in.close();
 
-    json_file["model_size_bytes"] = model_size;
-    json_file["model_size_mb"] = model_size_mb;
-    json_file["runtime_ns"] = runtime_ns;
-    json_file["runtime_s"] = runtime_s;
-    json_file["peak_rss_mb"] = rss_mb;
-    json_file["avg_cpu_usage"] = avg_cpu_usage;
+    add_if_missing_json(json_file, "model_size_bytes", model_size);
+    add_if_missing_json(json_file, "model_size_mb", model_size_mb);
+    add_if_missing_json(json_file, "runtime_ns", runtime_ns);
+    add_if_missing_json(json_file, "runtime_s", runtime_s);
+    add_if_missing_json(json_file, "peak_rss_mb", rss_mb);
+    add_if_missing_json(json_file, "avg_cpu_usage", avg_cpu_usage);
+    add_if_missing_json(json_file, "generated_tokens", generated_tokens);
+    add_if_missing_json(json_file, "total_tokens", total_tokens);
+    add_if_missing_json(json_file, "token_throughput", token_throughput);
+    add_if_missing_json(json_file, "kv_tokens_used", kv_tokens_used);
+    add_if_missing_json(json_file, "kv_tokens_capacity", kv_tokens_capacity);
+    add_if_missing_json(json_file, "kv_size_used_bytes", kv_size_used);
+    add_if_missing_json(json_file, "kv_size_estimated_bytes", kv_size_estimated);
+    add_if_missing_json(json_file, "kv_size_capacity_bytes", kv_size_capacity);
     write_energy_accum_json(json_file, energy, energy_accum);
-    json_file["generated_tokens"] = generated_tokens;
-    json_file["total_tokens"] = total_tokens;
-    json_file["token_throughput"] = token_throughput;
-    json_file["kv_tokens_used"] = kv_tokens_used;
-    json_file["kv_tokens_capacity"] = kv_tokens_capacity;
-    json_file["kv_size_used_bytes"] = kv_size_used;
-    json_file["kv_size_estimated_bytes"] = kv_size_estimated;
-    json_file["kv_size_capacity_bytes"] = kv_size_capacity;
+
     // Loop adds selected PAPI events to the output
-    for (size_t i = 0; i < event_names.size(); i++) json_file[event_names[i]] = papi_values[i];
-    
+    for (size_t i = 0; i < event_names.size(); i++){
+        add_if_missing_json(json_file, event_names[i], papi_values[i]);
+    }
+
     std::ofstream out(result_path);
     out << json_file.dump(2);
     out.close();

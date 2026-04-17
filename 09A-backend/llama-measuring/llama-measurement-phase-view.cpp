@@ -270,45 +270,6 @@ void write_metrics_to_json(const std::string& result_path,
     out << j.dump(2);
 }
 
-// ---- CSV PRESENTATION FUNCTIONS ----
-void write_papi_values(FILE * out_file, const std::vector<std::string> & event_names, const std::vector<long long> & values) {
-    for (size_t i = 0; i < event_names.size(); i++) {
-        fprintf(out_file, "%s: %lld\n", event_names[i].c_str(), values[i]);
-    }
-}
-
-void write_core_utilisation(FILE * out_file, const std::vector<CoreStat>& accum) {
-    auto topo = get_full_topology();
-    std::map<int, std::map<int, std::vector<int>>> socket_map;
-    for (auto& t : topo)
-        socket_map[t.socket_id][t.core_id].push_back(t.logical_id);
-
-    for (auto& [sock, cores] : socket_map) {
-        fprintf(out_file, "Socket %d:\n", sock);
-        for (auto& [core, logical_cpus] : cores) {
-            fprintf(out_file, "  Core %d ----\n", core);
-            for (int lc : logical_cpus) {
-                const CoreStat& s = accum[lc];
-                long long idle  = s.idle + s.iowait;
-                long long total = s.user + s.nice + s.system + s.idle
-                                + s.iowait + s.irq + s.softirq;
-                // Calculate average utilization percentage for this logical CPU
-                double util = total > 0 ? 100.0 * (1.0 - (double)idle / total) : 0.0;
-                fprintf(out_file, "    Thread %d: %.1f%%\n", lc, util);
-            }
-        }
-    }
-}
-
-void write_energy_accum(FILE * out_file, const perf_energy & e, const uint64_t accum[N_DOMAINS]) {
-    for (int i = 0; i < N_DOMAINS; i++) {
-        if (e.ok[i])
-            fprintf(out_file, "%s: %.2f uJ\n", DOMAIN_NAMES[i],
-                    energy_to_uj(e, i, accum[i]));
-        else
-            fprintf(out_file, "%s: not available\n", DOMAIN_NAMES[i]);
-    }
-}
 // --- ARGUMENT PARSING ---
 
 // Parse --papi-events from argv before passing the rest to llama's parser.
@@ -399,15 +360,6 @@ int main(int argc, char ** argv) {
         }
         printf("PAPI: added event %s\n", name.c_str());
     }
-
-    /*
-    // --- Open CSV and write dynamic header ---
-    FILE * out_file = fopen(result_path.c_str(), "w");
-    if (!out_file) {
-        fprintf(stderr, "Failed to open %s!\n", result_path.c_str());
-        return 1;
-    }
-    */
 
     // --- Standard llama arg parsing and initialization ---
     common_params params;
