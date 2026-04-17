@@ -1,3 +1,5 @@
+//TODO: ADD DATABASE FUNCTIOONALITY
+
 #include "arg.h"
 #include "common.h"
 #include "log.h"
@@ -10,43 +12,37 @@
 #include <cstring>
 #include <time.h>
 #include <papi.h>
-#include "energy-measure.h"
 #include <nlohmann/json.hpp> //Already inlcuded in llama.cpp
 #include <fstream>
 
+
 #define MAX_PAPI_EVENTS 4
 
-/* What this file should measure
+/* What this file should measure:
 
-● Total runtime: it means how much it takes for LLM to process all the input prompt to the
-  last output token generated
-
-● Number of input/output tokens :As this is not as equal as number of words in input and
-  outputs and it basically depends on each model's embedding.
-
-● Throughput (average token/s)
-
-● Total energy / power
-
-● Peak RSS memory
-
-● Total model size
-
-● Total KV-cache size
-
-● Average CPU utilization: IDK, the current version is multi-threaded or not, I guess it is as
-  the default of llama.cpp is multi-threaded.
-
-● Total cache misses
+● Runtime
+● FLOPs
+● Bytes moved
+● KV-cache footprint
+● Arithmetic intensity
+● Cache behavior
+● Share of total runtime (This will be given with sources outside of this file)
 
 */
-
 
 // Used for multibatched runs to keep down amount of runs needed
 bool unrestricted_events_supported = false;
 bool conversation_mode = false;
 
-// --- MEASUREMENT FUNCTIONS ---
+// ---- MEASUREMENT FUNCTIONS ---
+
+struct Decoder_Block{
+    std::string block_type; //Prefill or decode
+    int block_id;           
+    int64_t runtime;
+    std::vector<long long> papi_values;
+    size_t kv_footprint;
+};
 
 // Helper to get current time in nanoseconds for high-resolution timing
 static inline int64_t now_ns() {
@@ -55,56 +51,35 @@ static inline int64_t now_ns() {
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
-// Helper to get current RSS memory usage in KB by reading /proc/self/status
-static inline int64_t get_peak_rss_kb() {
-    FILE* f = fopen("/proc/self/status", "r");
-    char line[128];
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "VmPeak:", 7) == 0) {
-            long kb;
-            sscanf(line + 7, "%ld", &kb);
-            fclose(f);
-            return kb;
+// --------- JSON ----------
+
+//Writing to JSON using nlohmann/json library
+void write_block_to_json(nlohmann::json& j, const Decoder_Block& block, const std::vector<std::string>& event_names) {
+    // Find existing entry with same block_type and block_id
+    for (auto& entry : j) {
+        if (entry["block_type"] == block.block_type && 
+            entry["block_id"] == block.block_id) {
+            // Just add the new PAPI fields to existing entry
+            for (size_t i = 0; i < event_names.size(); i++) {
+                entry[event_names[i]] = block.papi_values[i];
+            }
+            return;
         }
     }
-    fclose(f);
-    return -1;
-}
-
-// Helper to get average CPU usage percentage over a short interval by reading /proc/stat
-static inline int64_t get_cpu_time_ns() {
-    FILE* f = fopen("/proc/self/stat", "r");
-    if (!f) return -1;
-    long utime, stime;
-    int ret = fscanf(f, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %ld %ld", &utime, &stime);
-    fclose(f);
-    if (ret != 2) return -1;
-    long ticks_per_sec = sysconf(_SC_CLK_TCK);
-    return (utime + stime) * (1000000000L / ticks_per_sec);
-}
-
-// --- JSON helpers ---
-
-// To avoid overwriting already exisiting values
-template <typename T>
-void add_if_missing_json(nlohmann::json& j, const std::string& key, T&& value) {
-    if (!j.contains(key)) {
-        j[key] = std::forward<T>(value);
+    // No existing entry found, create new one
+    nlohmann::json entry;
+    entry["block_type"]               = block.block_type;
+    entry["block_id"]                 = block.block_id;
+    entry["runtime_ns"]               = block.runtime;
+    entry["kv_cache_footprint_bytes"] = block.kv_footprint;
+    for (size_t i = 0; i < event_names.size(); i++) {
+        entry[event_names[i]]  = block.papi_values[i];
     }
-}
-
-void write_energy_accum_json(nlohmann::json json_file, const perf_energy & e, const uint64_t accum[N_DOMAINS]) {
-    for (int i = 0; i < N_DOMAINS; i++) {
-        if (e.ok[i]) 
-            add_if_missing_json(json_file, DOMAIN_NAMES[i], energy_to_uj(e, i, accum[i]));
-        else 
-            add_if_missing_json(json_file, DOMAIN_NAMES[i], nullptr);
-    }
+    j.push_back(entry);
 }
 
 
-
-// --- ARGUMENT PARSING ---
+// ---- ARGUMENT PARSING ---
 
 // Parse --papi-events from argv before passing the rest to llama's parser.
 // Removes our custom flag so llama's parser doesn't choke on it.
@@ -140,13 +115,13 @@ static std::vector<std::string> extract_args(int & argc, char ** argv, std::stri
     return events;
 }
 
-
-// --- MAIN FUNCTION ---
+// ---- MAIN FUNCTION ---
 
 int main(int argc, char ** argv) {
 
     // --- Extract our custom flag before llama arg parsing and initialization ---
     std::string result_path = "";
+
     std::vector<std::string> event_names = extract_args(argc, argv, result_path);
 
     if(result_path.empty()){
@@ -174,7 +149,6 @@ int main(int argc, char ** argv) {
             MAX_PAPI_EVENTS, event_names.size());
         return 1;
     }
-    std::vector<long long> papi_values(n_events, 0);
 
 
     if (PAPI_create_eventset(&papi_event_set) != PAPI_OK) {
@@ -197,8 +171,15 @@ int main(int argc, char ** argv) {
         printf("PAPI: added event %s\n", name.c_str());
     }
 
-    //Energy measuring init
-    perf_energy energy = energy_init();
+    // --- Open existing or create a new JSON ---
+
+    nlohmann::json json_file = nlohmann::json::array();
+    std::ifstream in(result_path);
+    if (in.good()) {
+        json_file = nlohmann::json::parse(in, nullptr, false);
+        if (json_file.is_discarded()) json_file = nlohmann::json::array();
+    }
+    in.close();
 
     // --- Standard llama arg parsing and initialization ---
     common_params params;
@@ -213,7 +194,6 @@ int main(int argc, char ** argv) {
 
     // Currently no warmup, if we wan't more stable results this could possibly help?
     params.warmup = false;
-    
 
     auto llama_init = common_init_from_params(params);
     auto * model    = llama_init->model();
@@ -238,15 +218,15 @@ int main(int argc, char ** argv) {
     const char * tmpl = llama_model_chat_template(model, nullptr);
     
 
-    ///////// START OF TOP-LEVEL MEASUREMENTS ///////
-    uint64_t energy_accum[N_DOMAINS] = {};
-    int64_t model_size = llama_model_size(model);
-    double model_size_mb = (double)model_size / (1024.0 * 1024.0);
-    int64_t start_time = now_ns();
-    int64_t start_cpu_time = get_cpu_time_ns();
-    int32_t generated_tokens = 0;
-    energy_reset(energy);
-    PAPI_start(papi_event_set);
+    ///////// MEASUREMENTS HOLDERS //////////////////
+    Decoder_Block prefill;
+    prefill.block_type = "Prefill";
+    prefill.block_id = 0;
+    prefill.papi_values.resize(n_events, 0);
+    Decoder_Block decode;
+    decode.block_type = "Decode";
+    decode.block_id = 0;
+    decode.papi_values.resize(n_events, 0);
     /////////////////////////////////////////////////
 
     // Conversation loop
@@ -263,22 +243,8 @@ int main(int argc, char ** argv) {
             current_prompt = params.prompt;
         } else {
             // Subsequent turns: get new user input
-            
-            // Stop timing and energy measurement while waiting for user input to get a more accurate measure of model performance
-            int64_t user_time = now_ns();
-            int64_t user_cpu_time = get_cpu_time_ns();
-            for (int i = 0 ; i < N_DOMAINS; i++) energy_accum[i] += energy_read(energy, i);
-
             printf("\nUser (or 'quit' to exit): ");
             std::getline(std::cin, current_prompt);
-
-            energy_reset(energy);
-            int64_t user_input_time = now_ns() - user_time;
-            int64_t user_input_cpu_time = get_cpu_time_ns() - user_cpu_time;
-
-            //Re-adjust start time to exclude user input time, so that our measurements reflect only model processing time
-            start_time += user_input_time; // Adjust start time to exclude user input time
-            start_cpu_time += user_input_cpu_time; // Adjust CPU time as well
 
             if (current_prompt == "quit" || current_prompt == "exit" || current_prompt.empty()) {
                 printf("Ending conversation.\n");
@@ -290,8 +256,8 @@ int main(int argc, char ** argv) {
         int new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
 
         if (new_len > (int)formatted.size()) {
-        formatted.resize(new_len);
-        new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+            formatted.resize(new_len);
+            new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
         }
 
         std::string prompt_delta(formatted.begin() + prev_len, formatted.begin() + new_len);
@@ -319,12 +285,29 @@ int main(int argc, char ** argv) {
             conversation_tokens.insert(conversation_tokens.end(), new_tokens.begin(), new_tokens.end());
         }
 
-        // PHASE 2: Prefill/Decode user input
+
+        // PHASE 2: Prefill/Decode user input -----------------------------------
+
+
+        //////// PREFILL MEASUREMENTS STARTS HERE /////////////
+        PAPI_reset(papi_event_set);
+        int64_t prefill_start = now_ns();
+        PAPI_start(papi_event_set);
+        ///////////////////////////////////////////////////////////
 
         if (llama_decode(ctx, llama_batch_get_one(new_tokens.data(), (int)new_tokens.size()))) {
             LOG_ERR("%s : decode failed\n", __func__);
             return 1;
         }
+
+        //////// PREFILL MEASUREMENTS ENDS HERE /////////////
+        PAPI_stop(papi_event_set, prefill.papi_values.data());
+        prefill.runtime = now_ns() - prefill_start;
+        prefill.kv_footprint = llama_state_seq_get_size(ctx, 0);
+        write_block_to_json(json_file, prefill, event_names);
+        prefill.block_id++;
+        ///////////////////////////////////////////////////////////
+
         printf("User input processed.\n");
         n_pos = (int)conversation_tokens.size();
 
@@ -335,7 +318,8 @@ int main(int argc, char ** argv) {
         std::vector<llama_token> response_tokens;
         for (int i = 0; i < n_predict; i++) {
 
-            // PHASE 3: Sampling
+            // PHASE 3: Sampling ----------------------------------------
+
             llama_token new_token = common_sampler_sample(smpl, ctx, -1);
             common_sampler_accept(smpl, new_token, true);
            
@@ -347,7 +331,6 @@ int main(int argc, char ** argv) {
             fflush(stdout);
 
             response_tokens.push_back(new_token);
-            generated_tokens++;
             conversation_tokens.push_back(new_token);
 
             if (n_pos >= n_ctx - 1) {
@@ -355,11 +338,28 @@ int main(int argc, char ** argv) {
                 break;
             }
 
-            // PHASE 4: Decode
+            // PHASE 4: Decode ------------------------------------------
+
+            //////// DECODE MEASUREMENTS STARTS HERE //////////////////
+            PAPI_reset(papi_event_set);
+            int64_t decode_start = now_ns();
+            PAPI_start(papi_event_set);
+            /////////////////////////////////////////////////////////////
+
+
             if (llama_decode(ctx, llama_batch_get_one(&new_token, 1))) {
                 fprintf(stderr, "\nDecode failed\n");
                 break;
             }
+
+            //////// DECODE MEASUREMENTS ENDS HERE /////////////////////
+            PAPI_stop(papi_event_set, decode.papi_values.data());
+            decode.runtime = now_ns() - decode_start;
+            decode.kv_footprint = llama_state_seq_get_size(ctx, 0);
+            write_block_to_json(json_file, decode, event_names);
+            decode.block_id++;
+            /////////////////////////////////////////////////////////////
+            
             n_pos++;
         }
 
@@ -384,95 +384,20 @@ int main(int argc, char ** argv) {
         }
     }
 
-    ////// STOP TOP-LEVEL MEASUREMENTS ///////////
-    PAPI_stop(papi_event_set, papi_values.data());
-    int64_t end_time = now_ns();
-    int64_t end_cpu_time = get_cpu_time_ns();
-    int64_t end_rss_kb = get_peak_rss_kb();
-
-    //RUNTIME
-    int64_t runtime_ns = end_time - start_time;
-    double runtime_s = (double)runtime_ns / 1e9;
-
-    //CPU USAGE
-    int64_t cpu_time_ns = end_cpu_time - start_cpu_time;
-    double avg_cpu_usage = ((double)(cpu_time_ns * 100) / (double)runtime_ns) / (double)sysconf(_SC_NPROCESSORS_ONLN); // Adjust for number of CPU cores
-    
-    //PEAK RSS
-    double rss_mb = (double)end_rss_kb / 1024.0; // Convert KB to MB
-
-    //ENERGY
-    for (int i = 0 ; i < N_DOMAINS; i++) energy_accum[i] += energy_read(energy, i);
-
-    //TOKENS
-    double token_throughput = (double)generated_tokens / runtime_s;
-    int32_t total_tokens = (int32_t)conversation_tokens.size();
-
-    //KV-CACHE
-    int32_t n_layers = llama_model_n_layer(model);
-    // int32_t n_embd   = llama_model_n_embd(model);
-    
-    // Bytes per element for each cache type
-    size_t k_elem_size = ggml_type_size(params.cache_type_k);
-    size_t v_elem_size = ggml_type_size(params.cache_type_v);
-    int32_t n_head_kv = llama_model_n_head_kv(model);
-    int32_t head_dim  = llama_model_n_embd(model) / llama_model_n_head(model);
-    int32_t kv_dim    = n_head_kv * head_dim;
-
-
-    llama_memory_t mem         = llama_get_memory(ctx);
-    llama_pos      kv_pos_max  = llama_memory_seq_pos_max(mem, 0);
-    int32_t kv_tokens_used     = (int32_t)kv_pos_max + 1;
-    int32_t kv_tokens_capacity = n_ctx;
-    size_t  kv_size_used       = llama_state_seq_get_size(ctx, 0);
-    int64_t kv_size_capacity   = (int64_t)kv_tokens_capacity * n_layers * kv_dim * (k_elem_size + v_elem_size);
-    int64_t kv_size_estimated = (int64_t)kv_tokens_used * n_layers * kv_dim * (k_elem_size + v_elem_size); // Estimated size based on tokens used
-
     //////////////////////////////////////////////
-
-    printf("\n--- Conversation ended ---\n");
-
-    // Write results to JSON
-
-    // Read existing JSON if it exists
-    nlohmann::json json_file = nlohmann::json::object();
-    std::ifstream in(result_path);
-    if (in.good()) {
-        json_file = nlohmann::json::parse(in, nullptr, false);
-        if (json_file.is_discarded()) json_file = nlohmann::json::object();
-    }
-    in.close();
-
-    add_if_missing_json(json_file, "model_size_bytes", model_size);
-    add_if_missing_json(json_file, "model_size_mb", model_size_mb);
-    add_if_missing_json(json_file, "runtime_ns", runtime_ns);
-    add_if_missing_json(json_file, "runtime_s", runtime_s);
-    add_if_missing_json(json_file, "peak_rss_mb", rss_mb);
-    add_if_missing_json(json_file, "avg_cpu_usage", avg_cpu_usage);
-    add_if_missing_json(json_file, "generated_tokens", generated_tokens);
-    add_if_missing_json(json_file, "total_tokens", total_tokens);
-    add_if_missing_json(json_file, "token_throughput", token_throughput);
-    add_if_missing_json(json_file, "kv_tokens_used", kv_tokens_used);
-    add_if_missing_json(json_file, "kv_tokens_capacity", kv_tokens_capacity);
-    add_if_missing_json(json_file, "kv_size_used_bytes", kv_size_used);
-    add_if_missing_json(json_file, "kv_size_estimated_bytes", kv_size_estimated);
-    add_if_missing_json(json_file, "kv_size_capacity_bytes", kv_size_capacity);
-    write_energy_accum_json(json_file, energy, energy_accum);
-
-    // Loop adds selected PAPI events to the output
-    for (size_t i = 0; i < event_names.size(); i++){
-        add_if_missing_json(json_file, event_names[i], papi_values[i]);
-    }
 
     std::ofstream out(result_path);
     out << json_file.dump(2);
-    out.close();
-   
+    printf("\n--- Conversation ended ---\n");
+
     // Clean up
     common_sampler_free(smpl);
+    //fclose(out_file);
     PAPI_destroy_eventset(&papi_event_set);
     PAPI_shutdown();
     llama_backend_free();
-   
+
+    printf("Measurements saved to %s\n", result_path.c_str());
+    
     return 0;
 }

@@ -2,6 +2,8 @@
 #Ignore all CSV files
 *.csv
 
+#Ignore all JSON files
+*.json
 #Ignore SQLite database files
 *.db
 
