@@ -500,7 +500,7 @@ def main():
     storage_type = "file"  # Default for energy and KV measurements
     db_path = os.path.join(LLAMA_ROOT, "profiling_data.db")
 
-    if run_type in ["single", "conversation", "all", "TOP-VIEW"]:
+    if run_type in ["single", "conversation", "all"]:
         storage_type = select_storage_type()
 
     #Add path to the correct binary based on the run type

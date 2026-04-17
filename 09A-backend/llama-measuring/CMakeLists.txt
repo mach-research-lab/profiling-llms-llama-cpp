@@ -30,15 +30,13 @@ set(TARGET llama-measurement-top-view)
 add_executable(${TARGET} llama-measurement-top-view.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
-target_include_directories(${TARGET} PRIVATE /usr/local/include ${PostgreSQL_INCLUDE_DIRS})
-target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} papi /usr/local/lib/libpapi.so ${PostgreSQL_LIBRARIES} energy-measure)
+target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} papi /usr/local/lib/libpapi.so energy-measure)
 
 # ── llama-measurement-phase-view ─────────────────────────────────────────────────────────────
 set(TARGET llama-measurement-phase-view)
 add_executable(${TARGET} llama-measurement-phase-view.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
-target_include_directories(${TARGET} PRIVATE /usr/local/include ${PostgreSQL_INCLUDE_DIRS})
 target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} papi /usr/local/lib/libpapi.so energy-measure)
 
 # ── llama-measurement-decoder-block-view ─────────────────────────────────────────────────────────────
@@ -46,5 +44,4 @@ set(TARGET llama-measurement-decoder-block-view)
 add_executable(${TARGET} llama-measurement-decoder-block-view.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
-target_include_directories(${TARGET} PRIVATE /usr/local/include ${PostgreSQL_INCLUDE_DIRS})
 target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} papi /usr/local/lib/libpapi.so)

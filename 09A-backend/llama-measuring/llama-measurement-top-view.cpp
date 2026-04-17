@@ -93,7 +93,7 @@ void add_if_missing_json(nlohmann::json& j, const std::string& key, T&& value) {
     }
 }
 
-void write_energy_accum_json(nlohmann::json json_file, const perf_energy & e, const uint64_t accum[N_DOMAINS]) {
+void write_energy_accum_json(nlohmann::json& json_file, const perf_energy & e, const uint64_t accum[N_DOMAINS]) {
     for (int i = 0; i < N_DOMAINS; i++) {
         if (e.ok[i]) 
             add_if_missing_json(json_file, DOMAIN_NAMES[i], energy_to_uj(e, i, accum[i]));
