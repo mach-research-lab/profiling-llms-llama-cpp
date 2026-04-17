@@ -11,13 +11,16 @@
 #include <cstring>
 #include <time.h>
 #include <papi.h>
-#include <libpq-fe.h>
+#include <sqlite3.h>
 #include <sstream>
+#include <string_view>
 
 #define MAX_PAPI_EVENTS 4
 
 // Used for multibatched runs to keep down amount of runs needed
 bool unrestricted_events_supported = false;
+bool conversation_mode = false;
+bool use_database = false;  // Flag to enable/disable database storage
 
 
 static inline int64_t now_ns() {
@@ -46,7 +49,7 @@ struct callback_data {
     int                           token_index;
     const char                  * phase;
     int                           n_events;
-    PGconn                      * db_conn;
+    sqlite3                     * db_conn;
     std::vector<std::string>    * event_names;
     int                           event_item_id_counter;
     std::vector<event_record>   * pending_records;
@@ -93,8 +96,8 @@ static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
     }
     fprintf(data->out_file, "\n");
 
-    // Accumulate record for later batch insertion into PostgreSQL
-    if (data->db_conn != nullptr && PQstatus(data->db_conn) == CONNECTION_OK && data->pending_records != nullptr) {
+    // Accumulate record for later batch insertion into SQLite
+    if (use_database && data->db_conn != nullptr && data->pending_records != nullptr) {
         event_record record;
         record.event_item_id = data->event_item_id_counter++;
         record.run_id = data->run_id;
@@ -113,73 +116,137 @@ static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
     return true;
 }
 
-static void batch_insert_to_database(PGconn* db_conn, const std::vector<event_record>& records, const std::vector<std::string>& event_names) {
-    if (db_conn == nullptr || PQstatus(db_conn) != CONNECTION_OK || records.empty()) {
+// Initialize SQLite database schema
+static bool init_sqlite_schema(sqlite3* db) {
+    const char* schema_sql =
+        "CREATE TABLE IF NOT EXISTS event_item ("
+        "  event_item_id INTEGER PRIMARY KEY,"
+        "  run_id INTEGER NOT NULL,"
+        "  event_item_timestamp TEXT DEFAULT CURRENT_TIMESTAMP,"
+        "  event_phase TEXT NOT NULL,"
+        "  event_token_index INTEGER NOT NULL,"
+        "  event_tensor_name TEXT NOT NULL,"
+        "  event_operation_type TEXT NOT NULL,"
+        "  event_time_microseconds INTEGER NOT NULL,"
+        "  event_size_bytes INTEGER NOT NULL,"
+        "  event_n_elements INTEGER NOT NULL"
+        ");"
+        "CREATE TABLE IF NOT EXISTS event_papi_counter ("
+        "  event_item_id INTEGER NOT NULL,"
+        "  papi_event_name TEXT NOT NULL,"
+        "  papi_value INTEGER NOT NULL,"
+        "  FOREIGN KEY (event_item_id) REFERENCES event_item(event_item_id)"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_event_run ON event_item(run_id);"
+        "CREATE INDEX IF NOT EXISTS idx_papi_event ON event_papi_counter(event_item_id);";
+
+    char* err_msg = nullptr;
+    int rc = sqlite3_exec(db, schema_sql, nullptr, nullptr, &err_msg);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error creating schema: %s\n", err_msg);
+        sqlite3_free(err_msg);
+        return false;
+    }
+    return true;
+}
+
+// Optimized batch insert using prepared statements and transactions
+static void batch_insert_to_database(sqlite3* db_conn, const std::vector<event_record>& records, const std::vector<std::string>& event_names) {
+    if (db_conn == nullptr || records.empty()) {
         return;
     }
 
-    printf("Inserting %zu records into database...\n", records.size());
+    printf("Inserting %zu records into SQLite database...\n", records.size());
 
-    // Begin transaction
-    PGresult *res = PQexec(db_conn, "BEGIN");
-    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-        fprintf(stderr, "BEGIN transaction failed: %s\n", PQerrorMessage(db_conn));
-        PQclear(res);
+    // Begin transaction for performance
+    char* err_msg = nullptr;
+    if (sqlite3_exec(db_conn, "BEGIN TRANSACTION", nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        fprintf(stderr, "BEGIN transaction failed: %s\n", err_msg);
+        sqlite3_free(err_msg);
         return;
     }
-    PQclear(res);
 
-    // Insert all event_item records
+    // Prepare statements for reuse (massive performance improvement)
+    sqlite3_stmt* event_stmt = nullptr;
+    sqlite3_stmt* papi_stmt = nullptr;
+
+    const char* event_sql =
+        "INSERT INTO event_item (event_item_id, run_id, event_phase, event_token_index, "
+        "event_tensor_name, event_operation_type, event_time_microseconds, "
+        "event_size_bytes, event_n_elements) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    const char* papi_sql =
+        "INSERT INTO event_papi_counter (event_item_id, papi_event_name, papi_value) VALUES (?, ?, ?)";
+
+    if (sqlite3_prepare_v2(db_conn, event_sql, -1, &event_stmt, nullptr) != SQLITE_OK) {
+        fprintf(stderr, "Failed to prepare event statement: %s\n", sqlite3_errmsg(db_conn));
+        sqlite3_exec(db_conn, "ROLLBACK", nullptr, nullptr, nullptr);
+        return;
+    }
+
+    if (sqlite3_prepare_v2(db_conn, papi_sql, -1, &papi_stmt, nullptr) != SQLITE_OK) {
+        fprintf(stderr, "Failed to prepare papi statement: %s\n", sqlite3_errmsg(db_conn));
+        sqlite3_finalize(event_stmt);
+        sqlite3_exec(db_conn, "ROLLBACK", nullptr, nullptr, nullptr);
+        return;
+    }
+
+    // Insert all records using prepared statements
     for (const auto& record : records) {
-        std::ostringstream query;
-        query << "INSERT INTO event_item (event_item_id, run_id, event_item_timestamp, event_phase, "
-              << "event_token_index, event_tensor_name, event_operation_type, "
-              << "event_time_microseconds, event_size_bytes, event_n_elements) VALUES ("
-              << record.event_item_id << ", " << record.run_id << ", NOW(), '" << record.phase << "', "
-              << record.token_index << ", '" << record.tensor_name << "', '" << record.op_name << "', "
-              << record.duration_us << ", " << record.tensor_size << ", " << record.n_elements << ");";
+        // Bind event_item parameters
+        sqlite3_bind_int64(event_stmt, 1, record.event_item_id);
+        sqlite3_bind_int64(event_stmt, 2, record.run_id);
+        sqlite3_bind_text(event_stmt, 3, record.phase.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(event_stmt, 4, record.token_index);
+        sqlite3_bind_text(event_stmt, 5, record.tensor_name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(event_stmt, 6, record.op_name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(event_stmt, 7, record.duration_us);
+        sqlite3_bind_int64(event_stmt, 8, record.tensor_size);
+        sqlite3_bind_int64(event_stmt, 9, record.n_elements);
 
-        res = PQexec(db_conn, query.str().c_str());
-        if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-            fprintf(stderr, "INSERT into event_item failed: %s\n", PQerrorMessage(db_conn));
-            PQclear(res);
-            PQexec(db_conn, "ROLLBACK");
+        if (sqlite3_step(event_stmt) != SQLITE_DONE) {
+            fprintf(stderr, "INSERT into event_item failed: %s\n", sqlite3_errmsg(db_conn));
+            sqlite3_finalize(event_stmt);
+            sqlite3_finalize(papi_stmt);
+            sqlite3_exec(db_conn, "ROLLBACK", nullptr, nullptr, nullptr);
             return;
         }
-        PQclear(res);
+        sqlite3_reset(event_stmt);
 
         // Insert PAPI counter data
         for (size_t i = 0; i < event_names.size() && i < record.papi_values.size(); i++) {
-            std::ostringstream papi_query;
-            papi_query << "INSERT INTO event_papi_counter (event_item_id, papi_event_name, papi_value) VALUES ("
-                       << record.event_item_id << ", '" << event_names[i] << "', "
-                       << record.papi_values[i] << ");";
+            sqlite3_bind_int64(papi_stmt, 1, record.event_item_id);
+            sqlite3_bind_text(papi_stmt, 2, event_names[i].c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(papi_stmt, 3, record.papi_values[i]);
 
-            res = PQexec(db_conn, papi_query.str().c_str());
-            if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-                fprintf(stderr, "INSERT into event_papi_counter failed: %s\n", PQerrorMessage(db_conn));
-                PQclear(res);
-                PQexec(db_conn, "ROLLBACK");
+            if (sqlite3_step(papi_stmt) != SQLITE_DONE) {
+                fprintf(stderr, "INSERT into event_papi_counter failed: %s\n", sqlite3_errmsg(db_conn));
+                sqlite3_finalize(event_stmt);
+                sqlite3_finalize(papi_stmt);
+                sqlite3_exec(db_conn, "ROLLBACK", nullptr, nullptr, nullptr);
                 return;
             }
-            PQclear(res);
+            sqlite3_reset(papi_stmt);
         }
     }
 
+    // Clean up prepared statements
+    sqlite3_finalize(event_stmt);
+    sqlite3_finalize(papi_stmt);
+
     // Commit transaction
-    res = PQexec(db_conn, "COMMIT");
-    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-        fprintf(stderr, "COMMIT failed: %s\n", PQerrorMessage(db_conn));
-        PQexec(db_conn, "ROLLBACK");
+    if (sqlite3_exec(db_conn, "COMMIT", nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        fprintf(stderr, "COMMIT failed: %s\n", err_msg);
+        sqlite3_free(err_msg);
+        sqlite3_exec(db_conn, "ROLLBACK", nullptr, nullptr, nullptr);
     } else {
-        printf("Successfully inserted %zu records into database.\n", records.size());
+        printf("Successfully inserted %zu records into SQLite database.\n", records.size());
     }
-    PQclear(res);
 }
 
 // Parse --papi-events from argv before passing the rest to llama's parser.
 // Removes our custom flag so llama's parser doesn't choke on it.
-static std::vector<std::string> extract_papi_args(int & argc, char ** argv, std::string & result_path) {
+static std::vector<std::string> extract_papi_args(int & argc, char ** argv, std::string & result_path, std::string & db_path) {
     std::vector<std::string> events;
     int write_idx = 1; // argv[0] stays
 
@@ -198,12 +265,19 @@ static std::vector<std::string> extract_papi_args(int & argc, char ** argv, std:
         } else if (std::strcmp(argv[i], "--result-path") == 0 && i + 1 < argc) {
             result_path = argv[i + 1];
             i++; // skip the value
+        } else if (std::strcmp(argv[i], "--db-path") == 0 && i + 1 < argc) {
+            db_path = argv[i + 1];
+            i++; // skip the value
+        } else if (std::strcmp(argv[i], "--use-db") == 0) {
+            use_database = true;
         } else if (std::strcmp(argv[i], "--papi-events-unrestricted") == 0) {
             unrestricted_events_supported = true;
+        } else if (std::strcmp(argv[i], "--conversation") == 0) {
+            conversation_mode = true;
         } else {
             argv[write_idx++] = argv[i]; // only forward unrecognized args
         }
-        
+
     }
     argc = write_idx;
     return events;
@@ -222,7 +296,8 @@ int main(int argc, char ** argv) {
 
     // --- Extract our custom flag before llama arg parsing ---
     std::string result_path = "measurements.csv";
-    std::vector<std::string> event_names = extract_papi_args(argc, argv, result_path);
+    std::string db_path = "profiling_data.db";
+    std::vector<std::string> event_names = extract_papi_args(argc, argv, result_path, db_path);
 
     if (event_names.empty()) {
         fprintf(stderr, "Error: no PAPI events specified.\n");
@@ -253,36 +328,65 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // --- PostgreSQL init ---
-    const char *db_conninfo = "host=localhost port=5434 dbname=toolDB user=user password=pass";
-    PGconn *db_conn = PQconnectdb(db_conninfo);
+    // --- SQLite init (only if --use-db flag is set) ---
+    sqlite3 *db_conn = nullptr;
+    if (use_database) {
+        int rc = sqlite3_open(db_path.c_str(), &db_conn);
+        if (rc != SQLITE_OK) {
+            fprintf(stderr, "Warning: Cannot open SQLite database: %s\n", sqlite3_errmsg(db_conn));
+            fprintf(stderr, "Continuing without database insertion (CSV only).\n");
+            sqlite3_close(db_conn);
+            db_conn = nullptr;
+            use_database = false;
+        } else {
+            printf("Successfully opened SQLite database: %s\n", db_path.c_str());
 
-    if (PQstatus(db_conn) != CONNECTION_OK) {
-        fprintf(stderr, "Warning: Connection to database failed: %s\n", PQerrorMessage(db_conn));
-        fprintf(stderr, "Continuing without database insertion (CSV only).\n");
-        PQfinish(db_conn);
-        db_conn = nullptr;
-    } else {
-        printf("Successfully connected to PostgreSQL database.\n");
+            // Initialize schema
+            if (!init_sqlite_schema(db_conn)) {
+                fprintf(stderr, "Warning: Failed to initialize database schema.\n");
+                fprintf(stderr, "Continuing without database insertion (CSV only).\n");
+                sqlite3_close(db_conn);
+                db_conn = nullptr;
+                use_database = false;
+            } else {
+                // Enable performance optimizations
+                sqlite3_exec(db_conn, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
+                sqlite3_exec(db_conn, "PRAGMA synchronous=NORMAL", nullptr, nullptr, nullptr);
+                sqlite3_exec(db_conn, "PRAGMA cache_size=10000", nullptr, nullptr, nullptr);
+                sqlite3_exec(db_conn, "PRAGMA temp_store=MEMORY", nullptr, nullptr, nullptr);
+            }
+        }
     }
 
-    // Generate unique run_id based on current timestamp in milliseconds
-    int64_t run_id = now_ns() / 1000000;  // Convert nanoseconds to milliseconds
+    // Generate unique run_id and event_item_id_counter from max existing values in database
+    int64_t run_id = 1;
+    int64_t event_item_id_start = 1;
+    if (use_database && db_conn != nullptr) {
+        sqlite3_stmt* stmt = nullptr;
+        const char* sql = "SELECT COALESCE(MAX(run_id), 0) + 1, COALESCE(MAX(event_item_id), 0) + 1 FROM event_item";
+        if (sqlite3_prepare_v2(db_conn, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                run_id             = sqlite3_column_int64(stmt, 0);
+                event_item_id_start = sqlite3_column_int64(stmt, 1);
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
     printf("Run ID: %ld\n", run_id);
 
     std::vector<event_record> pending_records;
 
     callback_data cb_data;
-    cb_data.papi_event_set       = PAPI_NULL;
-    cb_data.out_file             = nullptr;
-    cb_data.token_index          = 0;
-    cb_data.phase                = "prefill";
-    cb_data.n_events             = (int)event_names.size();
-    cb_data.db_conn              = db_conn;
-    cb_data.event_names          = &event_names;
-    cb_data.event_item_id_counter = 1;
-    cb_data.pending_records      = &pending_records;
-    cb_data.run_id               = run_id;
+    cb_data.papi_event_set        = PAPI_NULL;
+    cb_data.out_file              = nullptr;
+    cb_data.token_index           = 0;
+    cb_data.phase                 = "prefill";
+    cb_data.n_events              = (int)event_names.size();
+    cb_data.db_conn               = db_conn;
+    cb_data.event_names           = &event_names;
+    cb_data.event_item_id_counter = (int)event_item_id_start;
+    cb_data.pending_records       = &pending_records;
+    cb_data.run_id                = run_id;
 
     if (PAPI_create_eventset(&cb_data.papi_event_set) != PAPI_OK) {
         fprintf(stderr, "PAPI create eventset error!\n");
@@ -337,99 +441,178 @@ int main(int argc, char ** argv) {
     const int           n_ctx     = llama_n_ctx(ctx);
     const int           n_predict = params.n_predict < 0 ? 256 : params.n_predict;
 
-    // PHASE 1: Tokenization
-    int64_t t_tok_start = now_ns();
-    const bool add_bos  = llama_vocab_get_add_bos(vocab);
-    std::vector<llama_token> tokens = common_tokenize(ctx, params.prompt, add_bos);
-    int64_t t_tok_end   = now_ns();
-
-    if (tokens.empty()) {
-        LOG_ERR("%s : no input tokens\n", __func__);
-        return 1;
-    }
-
-    fprintf(cb_data.out_file, "tokenization,0,n/a,n/a,%ld,%zu,%zu",
-        (t_tok_end - t_tok_start),
-        tokens.size() * sizeof(llama_token),
-        tokens.size()
-    );
-    write_zero_counters(cb_data.out_file, cb_data.n_events);
-
-    printf("Tokenization: %zu tokens, %ld ns\n",
-        tokens.size(), (t_tok_end - t_tok_start));
-
-    // PHASE 2: Prefill
-    cb_data.phase       = "prefill";
-    cb_data.token_index = 0;
-
-    if (llama_decode(ctx, llama_batch_get_one(tokens.data(), (int)tokens.size()))) {
-        LOG_ERR("%s : prefill failed\n", __func__);
-        return 1;
-    }
-    printf("Prefill done.\n");
-
-    // PHASE 3 + 4: Sampling and Decode
     auto * smpl = common_sampler_init(model, params.sampling);
-    int n_pos   = (int)tokens.size();
+    const char * tmpl = llama_model_chat_template(model, nullptr);
+    std::vector<llama_chat_message> messages;
+    messages.push_back({"system", strdup("You are a helpful assistant. Always respond in English.")});
+    std::vector<char> formatted(n_ctx);
+    int prev_len = 0;
+    std::string response_text;
+    int n_pos = 0;
 
-    printf("Generating: ");
-    fflush(stdout);
+    // Conversation loop
+    bool continue_conversation = true;
+    int turn_number = 0;
 
-    for (int i = 0; i < n_predict; i++) {
+    while (continue_conversation) {
+        turn_number++;
+        printf("\n--- Turn %d ---\n", turn_number);
 
-        // PHASE 3: Sampling
-        int64_t t_samp_start = now_ns();
-        llama_token new_token = common_sampler_sample(smpl, ctx, -1);
-        common_sampler_accept(smpl, new_token, true);
-        int64_t t_samp_end = now_ns();
+        std::string current_prompt;
+        if (turn_number == 1) {
+            // First turn: use the provided prompt
+            current_prompt = params.prompt;
+        } else {
+            // Subsequent turns: get new user input
+            printf("\nUser (or 'quit' to exit): ");
+            std::getline(std::cin, current_prompt);
 
-        fprintf(cb_data.out_file, "sampling,%d,n/a,n/a,%ld,0,0",
-            i + 1,
-            (t_samp_end - t_samp_start)
+            if (current_prompt == "quit" || current_prompt == "exit" || current_prompt.empty()) {
+                printf("Ending conversation.\n");
+                break;
+            }
+        }
+
+        // Apply chat template to get only the new portion of the formatted prompt
+        messages.push_back({"user", strdup(current_prompt.c_str())});
+        int new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+        if (new_len > (int)formatted.size()) {
+            formatted.resize(new_len);
+            new_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), true, formatted.data(), formatted.size());
+        }
+        if (new_len < 0) {
+            fprintf(stderr, "Failed to apply chat template\n");
+            return 1;
+        }
+        std::string formatted_prompt(formatted.begin() + prev_len, formatted.begin() + new_len);
+
+        // PHASE 1: Tokenization
+        int64_t t_tok_start = now_ns();
+        std::vector<llama_token> new_tokens = common_tokenize(ctx, formatted_prompt, /*add_special=*/false, /*parse_special=*/true);
+        int64_t t_tok_end   = now_ns();
+
+        if (new_tokens.empty()) {
+            LOG_ERR("%s : no input tokens\n", __func__);
+            continue;
+        }
+
+        fprintf(cb_data.out_file, "tokenization,%d,n/a,n/a,%ld,%zu,%zu",
+            turn_number,
+            (t_tok_end - t_tok_start),
+            new_tokens.size() * sizeof(llama_token),
+            new_tokens.size()
         );
         write_zero_counters(cb_data.out_file, cb_data.n_events);
 
-        std::string piece = common_token_to_piece(ctx, new_token);
-        printf("%s", piece.c_str());
+        printf("Tokenization: %zu tokens, %ld ns\n",
+            new_tokens.size(), (t_tok_end - t_tok_start));
+
+        // Check if we're approaching context limit
+        if (n_pos + (int)new_tokens.size() + n_predict > n_ctx) {
+            printf("Warning: Conversation approaching context limit.\n");
+        }
+
+        // PHASE 2: Prefill/Decode user input
+        cb_data.phase       = (turn_number == 1) ? "prefill" : "decode";
+        cb_data.token_index = turn_number;
+
+        if (llama_decode(ctx, llama_batch_get_one(new_tokens.data(), (int)new_tokens.size()))) {
+            LOG_ERR("%s : decode failed\n", __func__);
+            return 1;
+        }
+        printf("User input processed.\n");
+        n_pos += (int)new_tokens.size();
+
+        // PHASE 3 + 4: Generate assistant response
+        printf("Assistant: ");
         fflush(stdout);
 
-        if (llama_vocab_is_eog(vocab, new_token)) break;
-        if (n_pos >= n_ctx - 1) break;
+        response_text.clear();
+        for (int i = 0; i < n_predict; i++) {
 
-        // PHASE 4: Decode
-        cb_data.phase       = "decode";
-        cb_data.token_index = i + 1;
+            // PHASE 3: Sampling
+            int64_t t_samp_start = now_ns();
+            llama_token new_token = common_sampler_sample(smpl, ctx, -1);
+            common_sampler_accept(smpl, new_token, true);
+            int64_t t_samp_end = now_ns();
 
-        if (llama_decode(ctx, llama_batch_get_one(&new_token, 1))) {
-            fprintf(stderr, "\nDecode failed\n");
-            break;
+            fprintf(cb_data.out_file, "sampling,%d,n/a,n/a,%ld,0,0",
+                turn_number * 1000 + i + 1,
+                (t_samp_end - t_samp_start)
+            );
+            write_zero_counters(cb_data.out_file, cb_data.n_events);
+
+            if (llama_vocab_is_eog(vocab, new_token)) break;
+
+            std::string piece = common_token_to_piece(ctx, new_token);
+            // Strip leading whitespace from the first token of each response
+            if (i == 0) {
+                size_t start = piece.find_first_not_of(" \t\n\r");
+                piece = (start != std::string::npos) ? piece.substr(start) : "";
+            }
+            printf("%s", piece.c_str());
+            fflush(stdout);
+
+            response_text += piece;
+            if (n_pos >= n_ctx - 1) {
+                printf("\n[Context limit reached]");
+                break;
+            }
+
+            // PHASE 4: Decode
+            cb_data.phase       = "decode";
+            cb_data.token_index = turn_number * 1000 + i + 1;
+
+            if (llama_decode(ctx, llama_batch_get_one(&new_token, 1))) {
+                fprintf(stderr, "\nDecode failed\n");
+                break;
+            }
+            n_pos++;
         }
-        n_pos++;
+
+        printf("\n");
+
+        // Update message history with assistant response
+        messages.push_back({"assistant", strdup(response_text.c_str())});
+        prev_len = llama_chat_apply_template(tmpl, messages.data(), messages.size(), false, nullptr, 0);
+        if (prev_len < 0) {
+            fprintf(stderr, "Failed to apply chat template\n");
+            prev_len = 0;
+        }
+
+        // Check if we should continue the conversation
+        if (!conversation_mode) {
+            // If not in conversation mode, only do one turn
+            continue_conversation = false;
+        }
     }
 
-    printf("\n");
+    printf("\n--- Conversation ended ---\n");
 
+    for (auto & msg : messages) {
+        free(const_cast<char *>(msg.content));
+    }
     common_sampler_free(smpl);
     fclose(cb_data.out_file);
     PAPI_destroy_eventset(&cb_data.papi_event_set);
     PAPI_shutdown();
 
     // Batch insert all accumulated records into database
-    if (db_conn != nullptr) {
+    if (use_database && db_conn != nullptr) {
         batch_insert_to_database(db_conn, pending_records, event_names);
     }
 
     // Clean up database connection
     if (db_conn != nullptr) {
-        PQfinish(db_conn);
-        printf("Database connection closed.\n");
+        sqlite3_close(db_conn);
+        printf("SQLite database closed.\n");
     }
 
     llama_backend_free();
 
     printf("Measurements saved to %s\n", result_path.c_str());
-    if (db_conn != nullptr) {
-        printf("Data also inserted into PostgreSQL database.\n");
+    if (use_database && db_conn != nullptr) {
+        printf("Data also inserted into SQLite database: %s\n", db_path.c_str());
     }
     return 0;
 }
