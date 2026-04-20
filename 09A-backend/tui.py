@@ -15,6 +15,8 @@ import shutil
 
 # Homemade module
 from event_retriever import get_available_events, get_valid_runs
+from run_handler import Config, run_every_view
+
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 LLAMA_ROOT  = os.path.dirname(SCRIPT_DIR)
@@ -54,9 +56,7 @@ def select_run_type():
         "3": ("kv",     "KV cache footprint"),
         "4": ("all",    "Run all (Multi-batch with event groups)"),
         "5": ("conversation", "Conversation mode with PAPI events"),
-        "6": ("TOP-VIEW", "Run TOP-VIEW measurements with PAPI events (experimental)"),
-        "7": ("PHASE-VIEW", "Run PHASE-VIEW measurements with PAPI events (experimental)"),
-        "8": ("DECODER-BLOCK-VIEW", "Run DECODER-BLOCK-VIEW measurements with PAPI events (experimental)")
+        "6": ("conversation_all", "Conversation with specified or default PAPI events (Multibatch)")
     }
 
     print("\nSelect run type:")
@@ -66,7 +66,7 @@ def select_run_type():
     while True:
         raw = input("> ").strip()
         if raw not in run_types:
-            print("Invalid choice. Enter 1, 2, 3, 4, 5, 6, 7, or 8.")
+            print("Invalid choice. Enter 1, 2, 3, 4, 5, 6")
             continue
 
         key, desc = run_types[raw]
@@ -86,9 +86,27 @@ def print_events():
         print(f"║  {i+1:2d}. {name:<12} — {desc:<100}║")
     print("╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
 
-def select_events():
+def select_events(run_type:str):
+    if run_type == "conversation_all":
+        print("\n Use default events [1] or choose custom [2]")
+        print("  1. Yes, use defaults")
+        print("  2. No, specify manually")
+        while True:
+            raw = input("> ").strip()
+            if raw == "" or raw == "1":
+                return None
+            elif raw == "2":
+                return select_events
+            else:
+                print("Invalid choice. Enter 1 or 2.")
+    
+    else:
+        return select_events_helper()
+        
+def select_events_helper():
     print_events()
     print("\nSelect up to 4 events (enter numbers separated by commas, e.g. 1,2,8,24):")
+    
     while True:
         raw = input("> ").strip()
         parts = [p.strip() for p in raw.split(",")]
@@ -251,85 +269,6 @@ def run_conversation_papi(model_path, events, prompt, n_predict, binary_path, st
     # Run interactively so user can input multiple turns
     subprocess.run(cmd, cwd=LLAMA_ROOT)
 
-#Used for running llama-papi in TOP-VIEW mode (experimental)
-def run_top_view_papi(model_path, events, prompt, n_predict, k_cache_type, v_cache_type, binary_path):
-    event_names = [e[0] for e in events]
-    events_arg = ",".join(event_names)
-
-    cmd = [
-        binary_path,
-        "--papi-events", events_arg,
-        "--result-path", "top_view_measurements.json",
-        "--conversation",  # Enable conversation mode for TOP-VIEW
-        "-m", model_path,
-        "-p", prompt,
-        "-n", str(n_predict),
-        "--cache-type-k", k_cache_type,
-        "--cache-type-v", v_cache_type,
-        "--temp", "0",  # fixed temp for consistent measurements
-        "--log-disable",
-    ]
-
-    print(f"\nStarting TOP-VIEW measurement with PAPI events...")
-    print(f"Running: {' '.join(cmd)}\n")
-    print("You can type 'quit' or 'exit' to end the conversation.\n")
-
-    # Run interactively so user can input multiple turns
-    subprocess.run(cmd, cwd=LLAMA_ROOT)
-
-def run_phase_view_papi(model_path, events, prompt, n_predict, binary_path):
-    event_names = [e[0] for e in events]
-    events_arg = ",".join(event_names)
-    cmd = [
-        binary_path,
-        "--papi-events", events_arg,
-        "--result-path", "phase_view_measurements.json",
-        "--conversation",  # Enable conversation mode for PHASE-VIEW
-        "--collect-prompts", #Save user written prompts during conversation
-        #"--user-prompts", "[\"hello\",\"tell me something cool\", \"quit\"]", #List of user given prompts
-        #llama.cpp args
-        "-m", model_path,
-        "-p", prompt,
-        "-n", str(n_predict),
-        "--temp", "0",  # fixed temp for consistent measurements
-        "--log-disable",
-    ]
-
-    print(f"\nStarting PHASE-VIEW measurement with PAPI events...")
-    print(f"Running: {' '.join(cmd)}\n")
-    print("You can type 'quit' or 'exit' to end the conversation.\n")
-
-    #Should only be used when collecting 
-    capture_output = True
-    # Run interactively so user can input multiple turns
-    subprocess.run(cmd, cwd=LLAMA_ROOT)
-
-def run_decoder_block_view_papi(model_path, events, prompt, n_predict, binary_path):
-    event_names = [e[0] for e in events]
-    events_arg = ",".join(event_names)
-    result_path = os.path.abspath("../decoder_block_view_measurements.json")
-
-    cmd = [
-        binary_path,
-        "--papi-events", events_arg,
-        "--result-path", result_path,
-        "--conversation",  # Enable conversation mode for DECODER-BLOCK-VIEW
-        "-m", model_path,
-        "-p", prompt,
-        "-n", str(n_predict),
-        "--temp", "0",  # fixed temp for consistent measurements
-        "--log-disable",
-    ]
-
-    print(f"\nStarting DECODER-BLOCK-VIEW measurement with PAPI events...")
-    print(f"Running: {' '.join(cmd)}\n")
-    print("You can type 'quit' or 'exit' to end the conversation.\n")
-
-    # Run interactively so user can input multiple turns
-    subprocess.run(cmd, cwd=LLAMA_ROOT)
-
-
-
 #Used for running kv-measure
 def run_kv_measurement(model_path, prompt, n_predict, k_cache_type, v_cache_type, binary_path):
     cmd = [
@@ -381,7 +320,6 @@ def run_energy(model_path, prompt, n_predict, binary_path):
         print(f"\n  ✓ Results saved to: {csv_path}")
     else:
         print("\n  ✗ energy.csv not found after run.")
-
 
 
 # --------- RUN ALL (Multi-batch with event groups) ---------
@@ -518,15 +456,11 @@ def main():
         binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
     elif run_type == "conversation":
         binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
-    elif run_type == "TOP-VIEW":
-        binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-top-view")
-    elif run_type == "PHASE-VIEW":
-        binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-phase-view")
-    elif run_type == "DECODER-BLOCK-VIEW":
-        binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-decoder-block-view")
+
+    # conversation_all resolves binary path
 
     # Check if the selected binary exists
-    if(not check_binary(binary_path)):
+    if run_type != "conversation_all" and (not check_binary(binary_path)):
         print(f"Binary not found: {binary_path}")
         print("Please compile binaries in /09A-backend/llama-measuring first.")
         sys.exit(1)
@@ -535,13 +469,13 @@ def main():
 
     #If single batch with PAPI events or conversation mode, allow event selection. Otherwise skip to prompt input.
     events = []
-    if run_type == "single" or run_type == "conversation" or run_type == "TOP-VIEW" or run_type == "PHASE-VIEW" or run_type == "DECODER-BLOCK-VIEW":
-        events = select_events()
+    if run_type == "single" or run_type == "conversation" or run_type == "conversation_all":
+        events = select_events(run_type)
 
     #If KV cache measurement, detect cache type from model name. Otherwise skip to prompt input.
     k_cache_type = None
     v_cache_type = None
-    if run_type == "kv" or run_type == "all" or run_type == "TOP-VIEW":
+    if run_type == "kv" or run_type == "all" or run_type == "conversation_all":
         k_cache_type, v_cache_type = select_kv_cache_type()
         print(f"\nSelected KV cache type: {k_cache_type}, {v_cache_type}")
 
@@ -555,6 +489,16 @@ def main():
     raw = input("> ").strip()
     n_predict = int(raw) if raw.isdigit() else 64
 
+    configuration = Config(
+        model_path,
+        events,
+        prompt,
+        n_predict,
+        k_cache_type,
+        v_cache_type,
+        binary_path
+    )
+
     if run_type == "single":
         run_single_papi(model_path, events, prompt, n_predict, binary_path, storage_type, db_path)
     elif run_type == "kv":
@@ -565,12 +509,9 @@ def main():
         run_all(model_path, prompt, n_predict, k_cache_type, v_cache_type, storage_type, db_path)
     elif run_type == "conversation":
         run_conversation_papi(model_path, events, prompt, n_predict, binary_path, storage_type, db_path)
-    elif run_type == "TOP-VIEW":
-        run_top_view_papi(model_path, events, prompt, n_predict, k_cache_type, v_cache_type, binary_path)
-    elif run_type == "PHASE-VIEW":
-        run_phase_view_papi(model_path, events, prompt, n_predict, binary_path)
-    elif run_type == "DECODER-BLOCK-VIEW":
-        run_decoder_block_view_papi(model_path, events, prompt, n_predict, binary_path)
+    elif run_type == "conversation_all":
+        run_every_view(configuration)
+
 
    
 

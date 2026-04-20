@@ -10,11 +10,12 @@ import shutil
 from enum import Enum
 # Homemade module
 from event_retriever import  get_valid_runs_from_list
+from measurements_complementation import complement_phase_json, complement_decoder_block_json
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 LLAMA_ROOT  = os.path.dirname(SCRIPT_DIR)
 MODELS_ROOT = os.path.join(os.path.expanduser("~"), "shared/models")
-
+OUTPUT_PATH = os.path.join(LLAMA_ROOT, "run_every_view_results")
 
 #Data class holding arguments
 @dataclass
@@ -62,6 +63,13 @@ DECODER_BLOCK_VIEW_PAPI_EVENTS = [
     "PAPI_TLB_DM",  # Data TLB misses
     "PAPI_TLB_IM",  # Instruction TLB misses
     "PAPI_TLB_TL",  # Total TLB misses
+
+    # FLOPS
+    "PAPI_FP_OPS",
+
+    #IPC
+    "PAPI_TOT_INS",
+    "PAPI_TOT_CYC"
 ]
 TENSOR_OP_VIEW_PAPI_EVENTS     = [
     # L1 Cache
@@ -93,6 +101,13 @@ TENSOR_OP_VIEW_PAPI_EVENTS     = [
     "PAPI_TLB_DM",  # Data TLB misses
     "PAPI_TLB_IM",  # Instruction TLB misses
     "PAPI_TLB_TL",  # Total TLB misses
+
+       # FLOPS
+    "PAPI_FP_OPS",
+
+    #IPC
+    "PAPI_TOT_INS",
+    "PAPI_TOT_CYC"
 ]
 
 
@@ -115,11 +130,11 @@ def get_user_prompts(result_path: str) -> list[str]:
         return json.dumps(json.load(f)["prompts"])
 
 
-#Function that runs everything
+#Function used to run specified view, is multibatch
 def run_view(config: Config, clean_folder: bool, type: Run_type, gather_prompts):
 
     #Output storage
-    output_dir = os.path.join(LLAMA_ROOT, "run_every_view_results")
+    output_dir = OUTPUT_PATH
     #If clean_folder is true, delete old run measurements and create new folder
     if clean_folder:
         if os.path.exists(output_dir):
@@ -193,8 +208,18 @@ def run_every_view(config: Config):
     config.binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
     run_view(config, False, Run_type.TENSOR_OP_VIEW, False)
 
+    #Complement JSON:s with additional fields
+    complement_phase_json(os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path),
+                          os.path.join(OUTPUT_PATH, Run_type.TENSOR_OP_VIEW.path),
+                          None, os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path))
     
+    complement_decoder_block_json(os.path.join(OUTPUT_PATH, Run_type.DECODER_BLOCK_VIEW.path),
+                                  os.path.join(OUTPUT_PATH, Run_type.TENSOR_OP_VIEW.path),
+                                  None,
+                                  os.path.join(OUTPUT_PATH, Run_type.DECODER_BLOCK_VIEW.path))
     
+
+"""
 #used for test run
 cfg_test = Config(
     model_path=os.path.join(MODELS_ROOT, "Llama3.2/Llama-3.2-1B-Instruct-Q4_K_M.gguf"),
@@ -207,3 +232,5 @@ cfg_test = Config(
 )
 
 run_every_view(cfg_test)
+
+"""
