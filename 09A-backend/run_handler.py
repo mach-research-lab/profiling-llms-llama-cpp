@@ -13,6 +13,7 @@ from event_retriever import  get_valid_runs_from_list
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 LLAMA_ROOT  = os.path.dirname(SCRIPT_DIR)
+MODELS_ROOT = os.path.join(os.path.expanduser("~"), "shared/models")
 
 
 #Data class holding arguments
@@ -196,7 +197,7 @@ def run_every_view(config: Config):
     
 #used for test run
 cfg_test = Config(
-    model_path="/home/david/shared/models/Llama3.2/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+    model_path=os.path.join(MODELS_ROOT, "Llama3.2/Llama-3.2-1B-Instruct-Q4_K_M.gguf"),
     custom_events= None,
     prompt="hello",
     n_predict=64,
