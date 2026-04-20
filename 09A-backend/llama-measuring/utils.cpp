@@ -31,6 +31,14 @@ Parsed_Args extract_args(int & argc, char ** argv) {
             parsed_args.unrestricted_events_supported = true;
         } else if (std::strcmp(argv[i], "--conversation") == 0) {
             parsed_args.conversation_mode = true;
+        } else if(std::strcmp(argv[i], "--disable-prints") == 0) {
+            parsed_args.disable_prints = true;
+        } else if(std::strcmp(argv[i], "--collect-prompts") == 0) {
+            parsed_args.collect_prompts = true;
+        } else if(std::strcmp(argv[i], "--warmup") == 0) {
+            parsed_args.warmup = true;
+        } else if(std::strcmp(argv[i], "--no-csv") == 0) {
+            parsed_args.no_csv = true;
         } else if (std::strcmp(argv[i], "--user-prompts") == 0 && i + 1 < argc) {
             std::string arg(argv[i + 1]);
             // Strip surrounding brackets if present: ["hello", "world"] -> "hello", "world"

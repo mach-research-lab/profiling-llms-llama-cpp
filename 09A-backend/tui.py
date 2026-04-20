@@ -280,12 +280,14 @@ def run_top_view_papi(model_path, events, prompt, n_predict, k_cache_type, v_cac
 def run_phase_view_papi(model_path, events, prompt, n_predict, binary_path):
     event_names = [e[0] for e in events]
     events_arg = ",".join(event_names)
-
     cmd = [
         binary_path,
         "--papi-events", events_arg,
         "--result-path", "phase_view_measurements.json",
         "--conversation",  # Enable conversation mode for PHASE-VIEW
+        "--collect-prompts", #Save user written prompts during conversation
+        #"--user-prompts", "[\"hello\",\"tell me something cool\", \"quit\"]", #List of user given prompts
+        #llama.cpp args
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),
@@ -297,6 +299,8 @@ def run_phase_view_papi(model_path, events, prompt, n_predict, binary_path):
     print(f"Running: {' '.join(cmd)}\n")
     print("You can type 'quit' or 'exit' to end the conversation.\n")
 
+    #Should only be used when collecting 
+    capture_output = True
     # Run interactively so user can input multiple turns
     subprocess.run(cmd, cwd=LLAMA_ROOT)
 

@@ -188,6 +188,72 @@ def build_valid_runs():
 def get_valid_runs():
     return build_valid_runs()
 
+def build_valid_runs_from_list(event_list: list[str]):
+    # Get all available events to filter against
+    available_event_names = {name for name, _ in get_available_events()}
+    
+    # Filter out unavailable events and warn
+    filtered = []
+    for name in event_list:
+        if name not in available_event_names:
+            print(f"Warning: {name} is not available on this hardware, skipping.")
+            continue
+        filtered.append(name)
 
+    # Get counter costs for the filtered events from detailed output
+    all_costs = {name: cost for name, cost in parse_available_event_with_hwc()}
+    events_with_cost = [(name, all_costs.get(name, 1)) for name in filtered]
+
+    proposed_runs = bin_pack_events(events_with_cost, get_hardware_counters())
+    event_costs = {name: cost for name, cost in events_with_cost}
+
+    validated_runs = []
+    overflow = []
+
+    for run in proposed_runs:
+        valid_run = []
+        rejected = []
+
+        for event in run:
+            candidate = valid_run + [event]
+            if len(candidate) == 1:
+                valid_run.append(event)
+                continue
+
+            is_valid, conflicting = validate_run(candidate)
+            if is_valid:
+                valid_run.append(event)
+            else:
+                if conflicting and conflicting in valid_run:
+                    swapped = [e for e in valid_run if e != conflicting] + [event]
+                    is_valid_swap, _ = validate_run(swapped)
+                    if is_valid_swap:
+                        valid_run = swapped
+                        rejected.append(conflicting)
+                        continue
+                rejected.append(event)
+
+        validated_runs.append(valid_run)
+        overflow.extend(rejected)
+
+    if overflow:
+        print(f"Re-packing {len(overflow)} conflicted events...")
+        overflow_pairs = [(e, event_costs.get(e, 1)) for e in overflow]
+        extra_runs = bin_pack_events(overflow_pairs, get_hardware_counters())
+        for run in extra_runs:
+            is_valid, _ = validate_run(run)
+            if is_valid:
+                validated_runs.append(run)
+            else:
+                for event in run:
+                    validated_runs.append([event])
+
+    validated_runs = merge_runs(validated_runs, get_hardware_counters(), event_costs)
+    print(f"Final run count after merging: {len(validated_runs)}")
+    return validated_runs
+
+
+def get_valid_runs_from_list(event_list: list[str]):
+    return build_valid_runs_from_list(event_list)
 
 

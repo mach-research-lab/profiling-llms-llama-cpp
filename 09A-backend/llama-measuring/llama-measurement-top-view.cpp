@@ -77,6 +77,8 @@ int main(int argc, char ** argv) {
     unrestricted_events_supported        = custom_args.unrestricted_events_supported;
     conversation_mode                    = custom_args.conversation_mode;
 
+    std::vector<std::string>collected_prompts;
+
     if(result_path.empty()){
         fprintf(stderr, "No given result path");
         return 1;
@@ -102,7 +104,9 @@ int main(int argc, char ** argv) {
             MAX_PAPI_EVENTS, event_names.size());
         return 1;
     }
-    std::vector<long long> papi_values(n_events, 0);
+    
+    std::vector<long long> papi_accum(n_events, 0);
+    std::vector<long long> papi_tmp(n_events, 0);
 
 
     if (PAPI_create_eventset(&papi_event_set) != PAPI_OK) {
@@ -122,7 +126,7 @@ int main(int argc, char ** argv) {
                 name.c_str());
             return 1;
         }
-        printf("PAPI: added event %s\n", name.c_str());
+        custom_print(custom_args.disable_prints, false, "PAPI: added event %s\n", name.c_str());
     }
 
     //Energy measuring init
@@ -140,7 +144,7 @@ int main(int argc, char ** argv) {
     llama_numa_init(params.numa);
 
     // Currently no warmup, if we wan't more stable results this could possibly help?
-    params.warmup = false;
+    params.warmup = custom_args.warmup;
     
 
     auto llama_init = common_init_from_params(params);
@@ -182,36 +186,54 @@ int main(int argc, char ** argv) {
     int turn_number = 0;
 
     while (continue_conversation) {
+
         turn_number++;
-        printf("\n--- Turn %d ---\n", turn_number);
+        custom_print(custom_args.disable_prints, false, "\n--- Turn %d ---\n", turn_number);
 
         std::string current_prompt;
-        if (turn_number == 1) {
+        if(!custom_args.user_prompts.empty()){
+            //Get next prompt   
+            current_prompt = custom_args.user_prompts.front(); 
+            //Remove same prompt from deque
+            custom_args.user_prompts.pop_front(); 
+        }
+        else if (turn_number == 1) {
             // First turn: use the provided prompt
             current_prompt = params.prompt;
-        } else {
-            // Subsequent turns: get new user input
-            
-            // Stop timing and energy measurement while waiting for user input to get a more accurate measure of model performance
+            //Save prompt
+            if(custom_args.collect_prompts) collected_prompts.emplace_back(current_prompt);
+        } 
+        else {
+
+            // --- PAUSE MEASUREMENTS WHILE WAITING FOR INPUT ---
+            PAPI_stop(papi_event_set, papi_tmp.data());
+            for (int i = 0; i < n_events; i++) papi_accum[i] += papi_tmp[i];
             int64_t user_time = now_ns();
             int64_t user_cpu_time = get_cpu_time_ns();
             for (int i = 0 ; i < N_DOMAINS; i++) energy_accum[i] += energy_read(energy, i);
-
-            printf("\nUser (or 'quit' to exit): ");
+            
+            // Subsequent turns: get new user input     
+            custom_print(custom_args.disable_prints, false, "\nUser (or 'quit' to exit): ");
             std::getline(std::cin, current_prompt);
 
+            // --- RESUME MEASURING ---
             energy_reset(energy);
             int64_t user_input_time = now_ns() - user_time;
             int64_t user_input_cpu_time = get_cpu_time_ns() - user_cpu_time;
-
             //Re-adjust start time to exclude user input time, so that our measurements reflect only model processing time
             start_time += user_input_time; // Adjust start time to exclude user input time
             start_cpu_time += user_input_cpu_time; // Adjust CPU time as well
+            PAPI_reset(papi_event_set);
+            PAPI_start(papi_event_set);
 
-            if (current_prompt == "quit" || current_prompt == "exit" || current_prompt.empty()) {
-                printf("Ending conversation.\n");
+
+            //Save prompt
+            if(custom_args.collect_prompts) collected_prompts.emplace_back(current_prompt);
+        }
+
+        if (current_prompt == "quit" || current_prompt == "exit" || current_prompt.empty()) {
+                custom_print(custom_args.disable_prints, false, "Ending conversation.\n");
                 break;
-            }
         }
 
         messages.push_back({"user", strdup(current_prompt.c_str())});
@@ -253,12 +275,14 @@ int main(int argc, char ** argv) {
             LOG_ERR("%s : decode failed\n", __func__);
             return 1;
         }
-        printf("User input processed.\n");
+
+        custom_print(custom_args.disable_prints, false, "User input processed.\n");
+
         n_pos = (int)conversation_tokens.size();
 
         // PHASE 3 + 4: Generate assistant response
-        printf("Assistant: ");
-        fflush(stdout);
+        
+        custom_print(custom_args.disable_prints, true, "Assistant: ");
 
         std::vector<llama_token> response_tokens;
         for (int i = 0; i < n_predict; i++) {
@@ -271,8 +295,8 @@ int main(int argc, char ** argv) {
 
             if (llama_vocab_is_eog(vocab, new_token)) break; //Check if end of generation token
 
-            printf("%s", piece.c_str());
-            fflush(stdout);
+            //Print generated piece
+            custom_print(custom_args.disable_prints, true, "%s", piece.c_str());
 
             response_tokens.push_back(new_token);
             generated_tokens++;
@@ -291,7 +315,7 @@ int main(int argc, char ** argv) {
             n_pos++;
         }
 
-        printf("\n");
+        custom_print(custom_args.disable_prints, false, "\n");
 
         std::string response_text;
         for (auto & tok : response_tokens) {
@@ -313,7 +337,8 @@ int main(int argc, char ** argv) {
     }
 
     ////// STOP TOP-LEVEL MEASUREMENTS ///////////
-    PAPI_stop(papi_event_set, papi_values.data());
+    PAPI_stop(papi_event_set, papi_tmp.data());
+    for (int i = 0; i < n_events; i++) papi_accum[i] += papi_tmp[i];
     int64_t end_time = now_ns();
     int64_t end_cpu_time = get_cpu_time_ns();
     int64_t end_rss_kb = get_peak_rss_kb();
@@ -358,7 +383,7 @@ int main(int argc, char ** argv) {
 
     //////////////////////////////////////////////
 
-    printf("\n--- Conversation ended ---\n");
+    custom_print(custom_args.disable_prints, false, "\n--- Conversation ended ---\n");
 
     // Write results to JSON
 
@@ -389,18 +414,25 @@ int main(int argc, char ** argv) {
 
     // Loop adds selected PAPI events to the output
     for (size_t i = 0; i < event_names.size(); i++){
-        add_if_missing_json(json_file, event_names[i], papi_values[i]);
+        add_if_missing_json(json_file, event_names[i], papi_accum[i]);
     }
 
     std::ofstream out(result_path);
     out << json_file.dump(2);
     out.close();
+
+    custom_print(custom_args.disable_prints, false, "Measurements saved to %s\n", result_path.c_str());
    
     // Clean up
     common_sampler_free(smpl);
     PAPI_destroy_eventset(&papi_event_set);
     PAPI_shutdown();
     llama_backend_free();
+
+    //Store colleceted prompts in json
+    if(custom_args.collect_prompts){
+        write_prompts_to_json(result_path, collected_prompts);
+    }
    
     return 0;
 }

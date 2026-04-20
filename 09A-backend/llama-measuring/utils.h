@@ -4,9 +4,12 @@ Various utility functions for parsing and measuring
 
 #pragma once
 
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <filesystem>
 #include <map>
 #include <time.h>
 #include <string>
@@ -16,6 +19,9 @@ Various utility functions for parsing and measuring
 #include <linux/perf_event.h>
 #include <asm/unistd.h>
 #include <sys/syscall.h>
+#include <fstream>
+#include <nlohmann/json.hpp> //Already inlcuded in llama.cpp
+
 
 // ----- ARGUMENT EXTRACTION -------
 
@@ -23,13 +29,54 @@ struct Parsed_Args{
     std::vector<std::string> events;
     std::string result_path;
     std::string db_path;
-    std::vector<std::string> user_prompts;
+    std::deque<std::string> user_prompts;
+    bool collect_prompts = false;
     bool use_database = false;
     bool unrestricted_events_supported = false;
     bool conversation_mode = false;
+    bool disable_prints = false;
+    bool warmup = false;
+    bool no_csv = false;
 };
 
 Parsed_Args extract_args(int & argc, char **argv);
+
+
+// ----- PROMPT COLLECTION --
+
+inline void write_prompts_to_json(const std::string& result_path,
+                           const std::vector<std::string>& prompts) {
+    // Build sibling path: same directory as result_path, named "collected_prompts.json"
+    std::filesystem::path p(result_path);
+    std::string prompts_path = (p.parent_path() / "collected_prompts.json").string();
+
+    nlohmann::json j;
+    j["prompts"] = prompts;
+
+    std::ofstream out(prompts_path);
+    out << j.dump(2);
+}
+
+// ----- PRINTING -----------
+
+//Custom print function, used if we want to flexibly disable printing
+inline void custom_print(bool disable_print, bool should_flush, const char* format, ...)
+{
+    if (disable_print) return;
+
+    va_list args;
+    va_start(args, format);
+
+    vfprintf(stdout, format, args);
+
+    va_end(args);
+
+    if (should_flush) {
+        fflush(stdout);
+    }
+}
+
+
 
 // ----- TIME MEASURING -----
 

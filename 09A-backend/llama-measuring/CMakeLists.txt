@@ -1,6 +1,8 @@
 # ── utils (shared utility) ──────────────────────────────────────────
+set(TARGET utils)
 add_library(utils STATIC utils.cpp)
 target_compile_features(utils PRIVATE cxx_std_17)
+target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT})
 
 # ── llama-papi ──────────────────────────────────────────────────────────────
 find_package(SQLite3 REQUIRED)
