@@ -96,7 +96,7 @@ def select_events(run_type:str):
             if raw == "" or raw == "1":
                 return None
             elif raw == "2":
-                return select_events
+                return select_events_helper()
             else:
                 print("Invalid choice. Enter 1 or 2.")
     
@@ -489,9 +489,11 @@ def main():
     raw = input("> ").strip()
     n_predict = int(raw) if raw.isdigit() else 64
 
+
+
     configuration = Config(
         model_path,
-        events,
+        [e[0] for e in events], #Removing description tag ('PAPI_*', 'Description...') -> ('PAPI_*')
         prompt,
         n_predict,
         k_cache_type,
