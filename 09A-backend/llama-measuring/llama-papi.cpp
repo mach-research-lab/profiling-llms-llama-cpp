@@ -2,8 +2,8 @@
 #include "common.h"
 #include "log.h"
 #include "llama.h"
-#include "llama-cpp.h"
 #include "sampling.h"
+#include "utils.h"
 #include <string>
 #include <vector>
 #include <iostream>
@@ -12,8 +12,6 @@
 #include <time.h>
 #include <papi.h>
 #include <sqlite3.h>
-#include <sstream>
-#include <string_view>
 
 #define MAX_PAPI_EVENTS 4
 
@@ -21,13 +19,8 @@
 bool unrestricted_events_supported = false;
 bool conversation_mode = false;
 bool use_database = false;  // Flag to enable/disable database storage
-
-
-static inline int64_t now_ns() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-}
+bool no_csv = false;
+bool disable_prints = false;
 
 struct event_record {
     int event_item_id;
@@ -84,21 +77,23 @@ static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
     int64_t      n_elements  = ggml_nelements(t);
     const char * op_name     = ggml_op_name(t->op);
 
+    
     // Write to CSV file
-    fprintf(data->out_file, "%s,%d,%s,%s,%ld,%zu,%ld",
-        data->phase,
-        data->token_index,
-        t->name,
-        op_name,
-        duration_ns,
-        tensor_size,
-        n_elements
-    );
-    for (int i = 0; i < data->n_events; i++) {
-        fprintf(data->out_file, ",%lld", papi_values[i]);
+    if(!no_csv){
+        fprintf(data->out_file, "%s,%d,%s,%s,%ld,%zu,%ld",
+            data->phase,
+            data->token_index,
+            t->name,
+            op_name,
+            duration_ns,
+            tensor_size,
+            n_elements
+        );
+        for (int i = 0; i < data->n_events; i++) {
+            fprintf(data->out_file, ",%lld", papi_values[i]);
+        }
+        fprintf(data->out_file, "\n");
     }
-    fprintf(data->out_file, "\n");
-
     // Accumulate record for later batch insertion into SQLite
     if (use_database && data->db_conn != nullptr && data->pending_records != nullptr) {
         event_record record;
@@ -158,9 +153,9 @@ static void batch_insert_to_database(sqlite3* db_conn, const std::vector<event_r
     if (db_conn == nullptr || records.empty()) {
         return;
     }
-
-    printf("Inserting %zu records into SQLite database...\n", records.size());
-
+    
+    custom_print(disable_prints, false, "Inserting %zu records into SQLite database...\n", records.size());
+    
     // Begin transaction for performance
     char* err_msg = nullptr;
     if (sqlite3_exec(db_conn, "BEGIN TRANSACTION", nullptr, nullptr, &err_msg) != SQLITE_OK) {
@@ -243,50 +238,9 @@ static void batch_insert_to_database(sqlite3* db_conn, const std::vector<event_r
         sqlite3_free(err_msg);
         sqlite3_exec(db_conn, "ROLLBACK", nullptr, nullptr, nullptr);
     } else {
-        printf("Successfully inserted %zu records into SQLite database.\n", records.size());
+        custom_print(disable_prints, false, "Successfully inserted %zu records into SQLite database.\n", records.size());
     }
 }
-
-// Parse --papi-events from argv before passing the rest to llama's parser.
-// Removes our custom flag so llama's parser doesn't choke on it.
-static std::vector<std::string> extract_papi_args(int & argc, char ** argv, std::string & result_path, std::string & db_path) {
-    std::vector<std::string> events;
-    int write_idx = 1; // argv[0] stays
-
-    for (int i = 1; i < argc; i++) {
-        if (std::strcmp(argv[i], "--papi-events") == 0 && i + 1 < argc) {
-            std::string arg(argv[i + 1]);
-            size_t start = 0;
-            while (start < arg.size()) {
-                size_t end = arg.find(',', start);
-                if (end == std::string::npos) end = arg.size();
-                std::string name = arg.substr(start, end - start);
-                if (!name.empty()) events.push_back(name);
-                start = end + 1;
-            }
-            i++; // skip the value
-        } else if (std::strcmp(argv[i], "--result-path") == 0 && i + 1 < argc) {
-            result_path = argv[i + 1];
-            i++; // skip the value
-        } else if (std::strcmp(argv[i], "--db-path") == 0 && i + 1 < argc) {
-            db_path = argv[i + 1];
-            i++; // skip the value
-        } else if (std::strcmp(argv[i], "--use-db") == 0) {
-            use_database = true;
-        } else if (std::strcmp(argv[i], "--papi-events-unrestricted") == 0) {
-            unrestricted_events_supported = true;
-        } else if (std::strcmp(argv[i], "--conversation") == 0) {
-            conversation_mode = true;
-        } else {
-            argv[write_idx++] = argv[i]; // only forward unrecognized args
-        }
-
-    }
-    argc = write_idx;
-    return events;
-}
-
-
 
 static void write_zero_counters(FILE * f, int n_events) {
     for (int i = 0; i < n_events; i++) {
@@ -298,9 +252,18 @@ static void write_zero_counters(FILE * f, int n_events) {
 int main(int argc, char ** argv) {
 
     // --- Extract our custom flag before llama arg parsing ---
-    std::string result_path = "measurements.csv";
-    std::string db_path = "profiling_data.db";
-    std::vector<std::string> event_names = extract_papi_args(argc, argv, result_path, db_path);
+    Parsed_Args custom_args = extract_args(argc, argv);
+    
+    std::string result_path              = custom_args.result_path;
+    std::vector<std::string> event_names = custom_args.events;
+    std::string db_path                  = custom_args.db_path;
+    use_database                         = custom_args.use_database;
+    unrestricted_events_supported        = custom_args.unrestricted_events_supported;
+    conversation_mode                    = custom_args.conversation_mode;
+    no_csv                               = custom_args.no_csv;
+    disable_prints                       = custom_args.disable_prints;
+
+    std::vector<std::string> collected_prompts;
 
     if (event_names.empty()) {
         fprintf(stderr, "Error: no PAPI events specified.\n");
@@ -342,7 +305,8 @@ int main(int argc, char ** argv) {
             db_conn = nullptr;
             use_database = false;
         } else {
-            printf("Successfully opened SQLite database: %s\n", db_path.c_str());
+            custom_print(disable_prints, false,
+                 "Successfully opened SQLite database: %s\n", db_path.c_str());
 
             // Initialize schema
             if (!init_sqlite_schema(db_conn)) {
@@ -375,7 +339,8 @@ int main(int argc, char ** argv) {
             sqlite3_finalize(stmt);
         }
     }
-    printf("Run ID: %ld\n", run_id);
+    
+    custom_print(custom_args.disable_prints, false, "Run ID: %ld\n", run_id);
 
     std::vector<event_record> pending_records;
 
@@ -408,7 +373,7 @@ int main(int argc, char ** argv) {
                 name.c_str());
             return 1;
         }
-        printf("PAPI: added event %s\n", name.c_str());
+        custom_print(custom_args.disable_prints, false, "PAPI: added event %s\n", name.c_str());
     }
     
     // UPDATED: Start the counters once globally
@@ -418,24 +383,26 @@ int main(int argc, char ** argv) {
     }
 
     // --- Open CSV and write dynamic header ---
-    cb_data.out_file = fopen(result_path.c_str(), "w");
-    if (!cb_data.out_file) {
-        fprintf(stderr, "Failed to open %s!\n", result_path.c_str());
-        return 1;
-    }
-
-    fprintf(cb_data.out_file, "phase,token_index,tensor_name,op_type,time_ns,size_bytes,n_elements");
-    for (const auto & name : event_names) {
-        std::string lower = name;
-        for (auto & c : lower) c = std::tolower(c);
-        fprintf(cb_data.out_file, ",%s", lower.c_str());
-    }
-    fprintf(cb_data.out_file, "\n");
+    if(!no_csv){
+        cb_data.out_file = fopen(result_path.c_str(), "w");
+        if (!cb_data.out_file) {
+            fprintf(stderr, "Failed to open %s!\n", result_path.c_str());
+            return 1;
+        }
+    
+        fprintf(cb_data.out_file, "phase,token_index,tensor_name,op_type,time_ns,size_bytes,n_elements");
+        for (const auto & name : event_names) {
+            std::string lower = name;
+            for (auto & c : lower) c = std::tolower(c);
+            fprintf(cb_data.out_file, ",%s", lower.c_str());
+        }
+        fprintf(cb_data.out_file, "\n");
+    }   
 
     // --- Hook up callbacks ---
     params.cb_eval           = my_cb_eval;
     params.cb_eval_user_data = &cb_data;
-    params.warmup            = false;
+    params.warmup            = custom_args.warmup;
 
     auto llama_init = common_init_from_params(params);
     auto * model    = llama_init->model();
@@ -465,21 +432,34 @@ int main(int argc, char ** argv) {
 
     while (continue_conversation) {
         turn_number++;
-        printf("\n--- Turn %d ---\n", turn_number);
+        custom_print(custom_args.disable_prints, false, "\n--- Turn %d ---\n", turn_number);
+
 
         std::string current_prompt;
-        if (turn_number == 1) {
+        if(!custom_args.user_prompts.empty()){
+            //Get next prompt   
+            current_prompt = custom_args.user_prompts.front(); 
+            //Remove same prompt from deque
+            custom_args.user_prompts.pop_front(); 
+        }
+        else if (turn_number == 1) {
             // First turn: use the provided prompt
             current_prompt = params.prompt;
-        } else {
-            // Subsequent turns: get new user input
-            printf("\nUser (or 'quit' to exit): ");
+            //Save prompt
+            if(custom_args.collect_prompts) collected_prompts.emplace_back(current_prompt);
+        } 
+        else {
+            // Subsequent turns: get new user input     
+            custom_print(custom_args.disable_prints, false, "\nUser (or 'quit' to exit): ");
             std::getline(std::cin, current_prompt);
 
-            if (current_prompt == "quit" || current_prompt == "exit" || current_prompt.empty()) {
-                printf("Ending conversation.\n");
+            //Save prompt
+            if(custom_args.collect_prompts) collected_prompts.emplace_back(current_prompt);
+        }
+
+        if (current_prompt == "quit" || current_prompt == "exit" || current_prompt.empty()) {
+                custom_print(custom_args.disable_prints, false, "Ending conversation.\n");
                 break;
-            }
         }
 
         // Apply chat template to get only the new portion of the formatted prompt
@@ -505,15 +485,18 @@ int main(int argc, char ** argv) {
             continue;
         }
 
-        fprintf(cb_data.out_file, "tokenization,%d,n/a,n/a,%ld,%zu,%zu",
-            turn_number,
-            (t_tok_end - t_tok_start),
-            new_tokens.size() * sizeof(llama_token),
-            new_tokens.size()
-        );
-        write_zero_counters(cb_data.out_file, cb_data.n_events);
+        if(!no_csv){
+            fprintf(cb_data.out_file, "tokenization,%d,n/a,n/a,%ld,%zu,%zu",
+                turn_number,
+                (t_tok_end - t_tok_start),
+                new_tokens.size() * sizeof(llama_token),
+                new_tokens.size()
+            );
+            write_zero_counters(cb_data.out_file, cb_data.n_events);
+        }
 
-        printf("Tokenization: %zu tokens, %ld ns\n",
+        custom_print(custom_args.disable_prints, false,
+            "Tokenization: %zu tokens, %ld ns\n",
             new_tokens.size(), (t_tok_end - t_tok_start));
 
         // Check if we're approaching context limit
@@ -529,12 +512,13 @@ int main(int argc, char ** argv) {
             LOG_ERR("%s : decode failed\n", __func__);
             return 1;
         }
-        printf("User input processed.\n");
-        n_pos += (int)new_tokens.size();
 
+        custom_print(custom_args.disable_prints, false, "User input processed.\n");
+        
+        n_pos += (int)new_tokens.size();
         // PHASE 3 + 4: Generate assistant response
-        printf("Assistant: ");
-        fflush(stdout);
+        
+        custom_print(custom_args.disable_prints, true, "Assistant: ");
 
         response_text.clear();
         for (int i = 0; i < n_predict; i++) {
@@ -545,11 +529,13 @@ int main(int argc, char ** argv) {
             common_sampler_accept(smpl, new_token, true);
             int64_t t_samp_end = now_ns();
 
-            fprintf(cb_data.out_file, "sampling,%d,n/a,n/a,%ld,0,0",
-                turn_number * 1000 + i + 1,
-                (t_samp_end - t_samp_start)
-            );
-            write_zero_counters(cb_data.out_file, cb_data.n_events);
+            if(!no_csv){
+                fprintf(cb_data.out_file, "sampling,%d,n/a,n/a,%ld,0,0",
+                    turn_number * 1000 + i + 1,
+                    (t_samp_end - t_samp_start)
+                );
+                write_zero_counters(cb_data.out_file, cb_data.n_events);
+            }
 
             if (llama_vocab_is_eog(vocab, new_token)) break;
 
@@ -559,8 +545,9 @@ int main(int argc, char ** argv) {
                 size_t start = piece.find_first_not_of(" \t\n\r");
                 piece = (start != std::string::npos) ? piece.substr(start) : "";
             }
-            printf("%s", piece.c_str());
-            fflush(stdout);
+            
+            //Print generated piece
+            custom_print(custom_args.disable_prints, true, "%s", piece.c_str());
 
             response_text += piece;
             if (n_pos >= n_ctx - 1) {
@@ -579,7 +566,7 @@ int main(int argc, char ** argv) {
             n_pos++;
         }
 
-        printf("\n");
+        custom_print(custom_args.disable_prints, false, "\n");
 
         // Update message history with assistant response
         messages.push_back({"assistant", strdup(response_text.c_str())});
@@ -596,14 +583,15 @@ int main(int argc, char ** argv) {
         }
     }
 
-    printf("\n--- Conversation ended ---\n");
+    custom_print(custom_args.disable_prints, false, "\n--- Conversation ended ---\n");
 
     for (auto & msg : messages) {
         free(const_cast<char *>(msg.content));
     }
     common_sampler_free(smpl);
-    fclose(cb_data.out_file);
-    
+  
+    if(!no_csv) fclose(cb_data.out_file);
+  
     // UPDATED: Cleanly stop the running counters before cleanup
     std::vector<long long> dummy_values(cb_data.n_events, 0);
     PAPI_stop(cb_data.papi_event_set, dummy_values.data());
@@ -619,14 +607,21 @@ int main(int argc, char ** argv) {
     // Clean up database connection
     if (db_conn != nullptr) {
         sqlite3_close(db_conn);
-        printf("SQLite database closed.\n");
+        custom_print(custom_args.disable_prints, false, "SQLite database closed.\n");
     }
 
     llama_backend_free();
 
-    printf("Measurements saved to %s\n", result_path.c_str());
+    custom_print(custom_args.disable_prints, false, "Measurements saved to %s\n", result_path.c_str());
+
     if (use_database && db_conn != nullptr) {
-        printf("Data also inserted into SQLite database: %s\n", db_path.c_str());
+        custom_print(custom_args.disable_prints, false, "Data also inserted into SQLite database: %s\n", db_path.c_str());
     }
+
+    //Store collected prompts in json
+    if(custom_args.collect_prompts){
+        write_prompts_to_json(result_path, collected_prompts);
+    }
+
     return 0;
 }

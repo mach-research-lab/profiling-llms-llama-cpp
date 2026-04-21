@@ -1,10 +1,9 @@
-//TODO: ADD DATABASE FUNCTIOONALITY
-
 #include "arg.h"
 #include "common.h"
 #include "log.h"
 #include "llama.h"
 #include "sampling.h"
+#include "utils.h"
 #include <string>
 #include <vector>
 #include <iostream>
@@ -14,7 +13,6 @@
 #include <papi.h>
 #include <nlohmann/json.hpp> //Already inlcuded in llama.cpp
 #include <fstream>
-
 
 #define MAX_PAPI_EVENTS 4
 
@@ -34,7 +32,6 @@
 bool unrestricted_events_supported = false;
 bool conversation_mode = false;
 
-// ---- MEASUREMENT FUNCTIONS ---
 
 struct Decoder_Block{
     std::string block_type; //Prefill or decode
@@ -43,13 +40,6 @@ struct Decoder_Block{
     std::vector<long long> papi_values;
     size_t kv_footprint;
 };
-
-// Helper to get current time in nanoseconds for high-resolution timing
-static inline int64_t now_ns() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-}
 
 // --------- JSON ----------
 
@@ -78,51 +68,19 @@ void write_block_to_json(nlohmann::json& j, const Decoder_Block& block, const st
     j.push_back(entry);
 }
 
-
-// ---- ARGUMENT PARSING ---
-
-// Parse --papi-events from argv before passing the rest to llama's parser.
-// Removes our custom flag so llama's parser doesn't choke on it.
-static std::vector<std::string> extract_args(int & argc, char ** argv, std::string & result_path) {
-    std::vector<std::string> events;
-    int write_idx = 1; // argv[0] stays
-
-    for (int i = 1; i < argc; i++) {
-        if (std::strcmp(argv[i], "--papi-events") == 0 && i + 1 < argc) {
-            std::string arg(argv[i + 1]);
-            size_t start = 0;
-            while (start < arg.size()) {
-                size_t end = arg.find(',', start);
-                if (end == std::string::npos) end = arg.size();
-                std::string name = arg.substr(start, end - start);
-                if (!name.empty()) events.push_back(name);
-                start = end + 1;
-            }
-            i++; // skip the value
-        } else if (std::strcmp(argv[i], "--result-path") == 0 && i + 1 < argc) {
-            result_path = argv[i + 1];
-            i++; // skip the value
-        } else if (std::strcmp(argv[i], "--papi-events-unrestricted") == 0) {
-            unrestricted_events_supported = true;
-        } else if (std::strcmp(argv[i], "--conversation") == 0) {
-            conversation_mode = true;
-        } else {
-            argv[write_idx++] = argv[i]; // only forward unrecognized args
-        }
-
-    }
-    argc = write_idx;
-    return events;
-}
-
 // ---- MAIN FUNCTION ---
 
 int main(int argc, char ** argv) {
 
     // --- Extract our custom flag before llama arg parsing and initialization ---
-    std::string result_path = "";
+    Parsed_Args custom_args = extract_args(argc, argv);
+    
+    std::string result_path              = custom_args.result_path;
+    std::vector<std::string> event_names = custom_args.events;
+    unrestricted_events_supported        = custom_args.unrestricted_events_supported;
+    conversation_mode                    = custom_args.conversation_mode;
 
-    std::vector<std::string> event_names = extract_args(argc, argv, result_path);
+    std::vector<std::string>collected_prompts;
 
     if(result_path.empty()){
         fprintf(stderr, "No given result path");
@@ -168,7 +126,7 @@ int main(int argc, char ** argv) {
                 name.c_str());
             return 1;
         }
-        printf("PAPI: added event %s\n", name.c_str());
+        custom_print(custom_args.disable_prints, false, "PAPI: added event %s\n", name.c_str());
     }
 
     // --- Open existing or create a new JSON ---
@@ -193,7 +151,7 @@ int main(int argc, char ** argv) {
     llama_numa_init(params.numa);
 
     // Currently no warmup, if we wan't more stable results this could possibly help?
-    params.warmup = false;
+    params.warmup = custom_args.warmup;
 
     auto llama_init = common_init_from_params(params);
     auto * model    = llama_init->model();
@@ -235,21 +193,34 @@ int main(int argc, char ** argv) {
 
     while (continue_conversation) {
         turn_number++;
-        printf("\n--- Turn %d ---\n", turn_number);
+        custom_print(custom_args.disable_prints, false, "\n--- Turn %d ---\n", turn_number);
+
 
         std::string current_prompt;
-        if (turn_number == 1) {
+        if(!custom_args.user_prompts.empty()){
+            //Get next prompt   
+            current_prompt = custom_args.user_prompts.front(); 
+            //Remove same prompt from deque
+            custom_args.user_prompts.pop_front(); 
+        }
+        else if (turn_number == 1) {
             // First turn: use the provided prompt
             current_prompt = params.prompt;
-        } else {
-            // Subsequent turns: get new user input
-            printf("\nUser (or 'quit' to exit): ");
+            //Save prompt
+            if(custom_args.collect_prompts) collected_prompts.emplace_back(current_prompt);
+        } 
+        else {
+            // Subsequent turns: get new user input     
+            custom_print(custom_args.disable_prints, false, "\nUser (or 'quit' to exit): ");
             std::getline(std::cin, current_prompt);
 
-            if (current_prompt == "quit" || current_prompt == "exit" || current_prompt.empty()) {
-                printf("Ending conversation.\n");
+            //Save prompt
+            if(custom_args.collect_prompts) collected_prompts.emplace_back(current_prompt);
+        }
+
+        if (current_prompt == "quit" || current_prompt == "exit" || current_prompt.empty()) {
+                custom_print(custom_args.disable_prints, false, "Ending conversation.\n");
                 break;
-            }
         }
 
         messages.push_back({"user", strdup(current_prompt.c_str())});
@@ -308,12 +279,13 @@ int main(int argc, char ** argv) {
         prefill.block_id++;
         ///////////////////////////////////////////////////////////
 
-        printf("User input processed.\n");
+        custom_print(custom_args.disable_prints, false, "User input processed.\n");
+        
         n_pos = (int)conversation_tokens.size();
 
         // PHASE 3 + 4: Generate assistant response
-        printf("Assistant: ");
-        fflush(stdout);
+        
+        custom_print(custom_args.disable_prints, true, "Assistant: ");
 
         std::vector<llama_token> response_tokens;
         for (int i = 0; i < n_predict; i++) {
@@ -327,8 +299,8 @@ int main(int argc, char ** argv) {
 
             if (llama_vocab_is_eog(vocab, new_token)) break; //Check if end of generation token
 
-            printf("%s", piece.c_str());
-            fflush(stdout);
+            //Print generated piece
+            custom_print(custom_args.disable_prints, true, "%s", piece.c_str());
 
             response_tokens.push_back(new_token);
             conversation_tokens.push_back(new_token);
@@ -363,7 +335,7 @@ int main(int argc, char ** argv) {
             n_pos++;
         }
 
-        printf("\n");
+        custom_print(custom_args.disable_prints, false, "\n");
 
         std::string response_text;
         for (auto & tok : response_tokens) {
@@ -388,7 +360,7 @@ int main(int argc, char ** argv) {
 
     std::ofstream out(result_path);
     out << json_file.dump(2);
-    printf("\n--- Conversation ended ---\n");
+    custom_print(custom_args.disable_prints, false, "\n--- Conversation ended ---\n");
 
     // Clean up
     common_sampler_free(smpl);
@@ -397,7 +369,12 @@ int main(int argc, char ** argv) {
     PAPI_shutdown();
     llama_backend_free();
 
-    printf("Measurements saved to %s\n", result_path.c_str());
+    custom_print(custom_args.disable_prints, false, "Measurements saved to %s\n", result_path.c_str());
+
+    //Store collected prompts in json
+    if(custom_args.collect_prompts){
+        write_prompts_to_json(result_path, collected_prompts);
+    }
     
     return 0;
 }
