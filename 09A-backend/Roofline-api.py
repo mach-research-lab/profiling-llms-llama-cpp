@@ -1,26 +1,39 @@
 #!/usr/bin/env python3
 """
-Roofline.py — Interactive terminal roofline analyser for llama.cpp profiling data.
+Roofline-api.py — FastAPI backend for llama.cpp Roofline Analysis.
 
 Data sources:
   JSON (decoder-block-view.json) — entire program, entire prefill, entire decode, specific decode block
-  Database (profiling_data.db)   — specific transformer layer (prefill or decode token)
+  Database (tensor_op_view.db)   — specific transformer layer (prefill or decode token)
 
-Peak FLOPS : cores × ((base_ghz + boost_ghz) / 2) × flops_per_cycle
-Mem BW     : STREAM benchmark (~/stream)
-OI         : PAPI_FP_OPS / (PAPI_L3_TCM × 64)
+Endpoints:
+  GET /hardware
+  GET /phases                                              → available blocks and tokens from JSON
+  GET /roofline/all                                        → entire program
+  GET /roofline/prefill                                    → entire prefill
+  GET /roofline/prefill/layer/{layer}                      → prefill layer (from DB)
+  GET /roofline/decode                                     → entire decode
+  GET /roofline/decode/{block_id}                          → specific decode block (from JSON)
+  GET /roofline/decode/{token_index}/layer/{layer}         → decode token + layer (from DB)
+
+Run:
+  pip install fastapi uvicorn
+  python3 Roofline-api.py
+  → http://localhost:8000/docs
 """
 
-import json
-import sys
 import os
 import re
+import glob
+import json
 import sqlite3
 import subprocess
-import glob
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Optional
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 RESULTS_DIR = os.path.join(
@@ -28,19 +41,14 @@ RESULTS_DIR = os.path.join(
     "09A", "profiling-llms-llama-cpp",
     "run_every_view_results",
 )
-DB_PATH = os.path.join(RESULTS_DIR, "tensor_op_view.db")
+DB_PATH          = os.path.join(RESULTS_DIR, "tensor_op_view.db")
 STREAM_PATH      = os.path.expanduser("~/stream")
 CACHE_LINE_BYTES = 64
 PAPI_FLOPS       = "PAPI_FP_OPS"
 PAPI_L3_MISS     = "PAPI_L3_TCM"
 
-# ── ANSI colours ──────────────────────────────────────────────────────────────
-BOLD   = "\033[1m"
-CYAN   = "\033[96m"
-GREEN  = "\033[92m"
-YELLOW = "\033[93m"
-RED    = "\033[91m"
-RESET  = "\033[0m"
+app = FastAPI(title="llama.cpp Roofline API", version="1.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -72,13 +80,10 @@ def get_block(data: list, block_type: str, block_id: int) -> Optional[dict]:
 
 
 def sum_blocks(blocks: list) -> dict:
-    total_flops   = sum(b.get("FLOPs", 0) for b in blocks)
-    total_bytes   = sum(b.get("bytes_moved", 0) for b in blocks)
-    total_runtime = sum(b.get("runtime_ns", 0) for b in blocks)
     return {
-        "total_flops" : total_flops,
-        "dram_bytes"  : total_bytes,
-        "time_seconds": total_runtime / 1e9,
+        "total_flops" : sum(b.get("FLOPs", 0) for b in blocks),
+        "dram_bytes"  : sum(b.get("bytes_moved", 0) for b in blocks),
+        "time_seconds": sum(b.get("runtime_ns", 0) for b in blocks) / 1e9,
     }
 
 
@@ -137,19 +142,16 @@ def db_available(db_path: str = DB_PATH) -> bool:
 
 
 def get_layer_numbers(phase: str, token_index: Optional[int] = None, db_path: str = DB_PATH) -> list[int]:
-    """Extract distinct layer numbers from tensor names ending with -N."""
     conditions = ["event_phase = ?"]
     params: list = [phase]
     if token_index is not None:
         conditions.append("event_token_index = ?")
         params.append(token_index)
     where = " AND ".join(conditions)
-
     rows = fetchall(
         f"SELECT DISTINCT event_tensor_name FROM event_item WHERE {where}",
         tuple(params), db_path=db_path,
     )
-
     layers = set()
     for r in rows:
         m = re.search(r"-(\d+)$", r["event_tensor_name"])
@@ -166,13 +168,7 @@ def get_decode_token_indices(db_path: str = DB_PATH) -> list[int]:
     return [r["event_token_index"] for r in rows]
 
 
-def get_papi_sum_for_layer(
-    papi_event: str,
-    phase: str,
-    layer: int,
-    token_index: Optional[int] = None,
-    db_path: str = DB_PATH,
-) -> int:
+def get_papi_sum_for_layer(papi_event: str, phase: str, layer: int, token_index: Optional[int] = None, db_path: str = DB_PATH) -> int:
     sql = """
         SELECT SUM(p.papi_value) AS total
         FROM event_item e
@@ -185,17 +181,11 @@ def get_papi_sum_for_layer(
     if token_index is not None:
         sql += " AND e.event_token_index = ?"
         params.append(token_index)
-
     row = fetchone(sql, tuple(params), db_path=db_path)
     return int(row["total"] or 0) if row else 0
 
 
-def get_time_sum_for_layer(
-    phase: str,
-    layer: int,
-    token_index: Optional[int] = None,
-    db_path: str = DB_PATH,
-) -> float:
+def get_time_sum_for_layer(phase: str, layer: int, token_index: Optional[int] = None, db_path: str = DB_PATH) -> float:
     sql = """
         SELECT SUM(event_time_microseconds) AS total
         FROM event_item
@@ -206,18 +196,11 @@ def get_time_sum_for_layer(
     if token_index is not None:
         sql += " AND event_token_index = ?"
         params.append(token_index)
-
     row = fetchone(sql, tuple(params), db_path=db_path)
     return (row["total"] or 0) / 1e6 if row else 0.0
 
 
-def roofline_from_db_layer(
-    phase: str,
-    layer: int,
-    token_index: Optional[int] = None,
-    label: str = "",
-    db_path: str = DB_PATH,
-) -> dict:
+def roofline_from_db_layer(phase: str, layer: int, token_index: Optional[int] = None, label: str = "", db_path: str = DB_PATH) -> dict:
     hw         = get_hardware()
     flops      = get_papi_sum_for_layer(PAPI_FLOPS,   phase, layer, token_index, db_path)
     l3_misses  = get_papi_sum_for_layer(PAPI_L3_MISS, phase, layer, token_index, db_path)
@@ -331,272 +314,144 @@ def get_hardware() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Display helpers
+#  Startup
 # ══════════════════════════════════════════════════════════════════════════════
 
-def print_hardware(hw: dict):
-    print()
-    print("=" * 50)
-    print(f"  CPU      : {hw['cpu_model']}")
-    print(f"  Cores    : {hw['cores']}")
-    print(f"  Base GHz : {hw['base_ghz']}")
-    print(f"  Boost GHz: {hw['boost_ghz']}")
-    print(f"  Avg GHz  : {hw['avg_ghz']}  [(base + boost) / 2]")
-    print(f"  ISA      : {hw['isa']}  ({hw['flops_per_cycle']} FLOP/cycle)")
-    print(f"  Peak     : {hw['peak_gflops']} GFLOPS  [cores × avg_ghz × fpc]")
-    print(f"  Mem BW   : {hw['mem_bw_gbs']} GB/s  (STREAM Copy)")
-    print(f"  Ridge pt : {hw['ridge_point']} FLOP/byte")
-    print("=" * 50)
-
-
-def print_result(result: dict):
-    bound_color = GREEN if result["bound"] == "compute" else YELLOW
-    source_tag  = f"  [{result.get('source', '?')}]"
-    print()
-    print(f"{BOLD}--- [RESULT] {result['label']}{source_tag} ---{RESET}")
-    print(f"  {'FLOPS':<16}: {result['total_flops']:,}")
-    if result.get("l3_misses") is not None:
-        print(f"  {'L3 misses':<16}: {result['l3_misses']:,}")
-    print(f"  {'DRAM bytes':<16}: {result['dram_bytes']:,}")
-    print(f"  {'Time (s)':<16}: {result['time_seconds']:.4f}")
-    print(f"  {'OI':<16}: {result['oi']:.4f} FLOP/byte")
-    print(f"  {'Achieved':<16}: {result['achieved_gflops']:.4f} GFLOPS")
-    print(f"  {'Bound':<16}: {bound_color}{result['bound'].upper()}{RESET}")
-    print()
-    print(f"{BOLD}--- [JSON DATA] ---{RESET}")
-    print(json.dumps(result, indent=2))
-    print("-------------------")
+@app.on_event("startup")
+async def startup():
+    print("\n[STARTUP] Warming up hardware ceiling...")
+    hw = get_hardware()
+    print(f"[STARTUP] {hw['cpu_model']}")
+    print(f"[STARTUP] Peak: {hw['peak_gflops']} GFLOPS | BW: {hw['mem_bw_gbs']} GB/s | Ridge: {hw['ridge_point']} FLOP/byte")
+    json_path = find_decoder_block_json()
+    if json_path:
+        print(f"[STARTUP] JSON: {json_path}")
+    else:
+        print("[STARTUP WARN] decoder-block-view.json not found.")
+    print(f"[STARTUP] DB: {'found' if db_available() else 'not found'}\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Sub-menus
+#  Endpoints
 # ══════════════════════════════════════════════════════════════════════════════
 
-def menu_prefill(data: list, db_path: str):
-    while True:
-        print()
-        print("=" * 44)
-        print(f"  {BOLD}PREFILL{RESET}")
-        print("=" * 44)
-        print("  1. Entire Prefill")
-        print("  2. Specific layer")
-        print("  0. Back")
-        print("=" * 44)
-        choice = input("Choice: ").strip()
-
-        if choice == "0":
-            break
-
-        elif choice == "1":
-            blocks = get_blocks(data, "Prefill")
-            if not blocks:
-                print("  No Prefill blocks in JSON.")
-                continue
-            agg    = sum_blocks(blocks)
-            result = roofline_from_aggregated(agg, "Entire Prefill")
-            print_result(result)
-
-        elif choice == "2":
-            if not db_available(db_path):
-                print(f"  {RED}[ERROR]{RESET} Database not found. Run the profiler first.")
-                continue
-            layers = get_layer_numbers("prefill", db_path=db_path)
-            if not layers:
-                print("  No layers found in database for prefill.")
-                continue
-            print(f"\n  Available layers: {layers[0]} – {layers[-1]}")
-            raw = input("  Enter layer number or press Enter to go back: ").strip()
-            if not raw:
-                continue
-            try:
-                layer = int(raw)
-            except ValueError:
-                print("  Invalid input.")
-                continue
-            if layer not in layers:
-                print(f"  Layer {layer} not found.")
-                continue
-            result = roofline_from_db_layer(
-                "prefill", layer,
-                label=f"Prefill layer {layer}",
-                db_path=db_path,
-            )
-            print_result(result)
-
-        else:
-            print("  Unknown choice.")
+@app.get("/hardware")
+def hardware():
+    return get_hardware()
 
 
-def menu_decode(data: list, db_path: str):
-    while True:
-        print()
-        print("=" * 44)
-        print(f"  {BOLD}DECODE{RESET}")
-        print("=" * 44)
-        print("  1. Entire Decode")
-        print("  2. Specific decode block (token)")
-        print("  3. Specific layer for a decode token")
-        print("  0. Back")
-        print("=" * 44)
-        choice = input("Choice: ").strip()
+@app.get("/phases")
+def phases():
+    """Return available blocks and decode tokens for the UI."""
+    json_path = find_decoder_block_json()
+    if not json_path:
+        raise HTTPException(status_code=404, detail="decoder-block-view.json not found.")
+    data = load_json(json_path)
 
-        if choice == "0":
-            break
+    prefill_blocks = [b["block_id"] for b in get_blocks(data, "Prefill")]
+    decode_blocks  = [b["block_id"] for b in get_blocks(data, "Decode")]
+    decode_tokens  = get_decode_token_indices() if db_available() else []
 
-        elif choice == "1":
-            blocks = get_blocks(data, "Decode")
-            if not blocks:
-                print("  No Decode blocks in JSON.")
-                continue
-            agg    = sum_blocks(blocks)
-            result = roofline_from_aggregated(agg, "Entire Decode")
-            print_result(result)
-
-        elif choice == "2":
-            blocks = get_blocks(data, "Decode")
-            if not blocks:
-                print("  No Decode blocks in JSON.")
-                continue
-            ids = [b["block_id"] for b in blocks]
-            print(f"\n  Available decode blocks: {ids}")
-            raw = input("  Enter block_id or press Enter to go back: ").strip()
-            if not raw:
-                continue
-            try:
-                bid = int(raw)
-            except ValueError:
-                print("  Invalid input.")
-                continue
-            block = get_block(data, "Decode", bid)
-            if not block:
-                print(f"  Block {bid} not found.")
-                continue
-            agg = {
-                "total_flops" : block["FLOPs"],
-                "dram_bytes"  : block["bytes_moved"],
-                "time_seconds": block["runtime_ns"] / 1e9,
-            }
-            result = roofline_from_aggregated(agg, f"Decode block {bid}")
-            print_result(result)
-
-        elif choice == "3":
-            if not db_available(db_path):
-                print(f"  {RED}[ERROR]{RESET} Database not found. Run the profiler first.")
-                continue
-            tokens = get_decode_token_indices(db_path)
-            if not tokens:
-                print("  No decode tokens found in database.")
-                continue
-            print(f"\n  Available decode tokens: {tokens}")
-            raw = input("  Enter token_index or press Enter to go back: ").strip()
-            if not raw:
-                continue
-            try:
-                token_index = int(raw)
-            except ValueError:
-                print("  Invalid input.")
-                continue
-            if token_index not in tokens:
-                print(f"  Token {token_index} not found.")
-                continue
-            layers = get_layer_numbers("decode", token_index=token_index, db_path=db_path)
-            if not layers:
-                print("  No layers found for this token.")
-                continue
-            print(f"\n  Available layers: {layers[0]} – {layers[-1]}")
-            raw = input("  Enter layer number or press Enter to go back: ").strip()
-            if not raw:
-                continue
-            try:
-                layer = int(raw)
-            except ValueError:
-                print("  Invalid input.")
-                continue
-            if layer not in layers:
-                print(f"  Layer {layer} not found.")
-                continue
-            turn = token_index // 1000
-            pos  = token_index % 1000
-            result = roofline_from_db_layer(
-                "decode", layer,
-                token_index=token_index,
-                label=f"Decode turn {turn} pos {pos} layer {layer}",
-                db_path=db_path,
-            )
-            print_result(result)
-
-        else:
-            print("  Unknown choice.")
+    return {
+        "prefill_blocks" : prefill_blocks,
+        "decode_blocks"  : decode_blocks,
+        "decode_tokens"  : decode_tokens,
+        "db_available"   : db_available(),
+    }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Main menu
-# ══════════════════════════════════════════════════════════════════════════════
+@app.get("/roofline/all")
+def roofline_all():
+    """Entire program (prefill + decode combined)."""
+    json_path = find_decoder_block_json()
+    if not json_path:
+        raise HTTPException(status_code=404, detail="decoder-block-view.json not found.")
+    data = load_json(json_path)
+    agg  = sum_blocks(data)
+    return roofline_from_aggregated(agg, "Entire program")
 
-def menu_loop(data: list, json_path: str, db_path: str):
-    while True:
-        print()
-        print("=" * 44)
-        print(f"  {BOLD}ROOFLINE MENU{RESET}")
-        print(f"  JSON : {os.path.basename(json_path)}")
-        db_status = f"{GREEN}available{RESET}" if db_available(db_path) else f"{RED}not found{RESET}"
-        print(f"  DB   : {db_status}")
-        print("=" * 44)
-        print("  1. Show hardware")
-        print("  2. Entire program")
-        print("  3. Prefill")
-        print("  4. Decode")
-        print("  0. Exit")
-        print("=" * 44)
 
-        choice = input("Make your choice (0-4): ").strip()
+@app.get("/roofline/prefill")
+def roofline_prefill():
+    """Entire prefill phase."""
+    json_path = find_decoder_block_json()
+    if not json_path:
+        raise HTTPException(status_code=404, detail="decoder-block-view.json not found.")
+    data   = load_json(json_path)
+    blocks = get_blocks(data, "Prefill")
+    if not blocks:
+        raise HTTPException(status_code=404, detail="No Prefill blocks found.")
+    agg = sum_blocks(blocks)
+    return roofline_from_aggregated(agg, "Entire Prefill")
 
-        if choice == "0":
-            print("Bye!")
-            break
-        elif choice == "1":
-            print_hardware(get_hardware())
-        elif choice == "2":
-            if not data:
-                print("  No data in JSON.")
-                continue
-            agg    = sum_blocks(data)
-            result = roofline_from_aggregated(agg, "Entire program")
-            print_result(result)
-        elif choice == "3":
-            menu_prefill(data, db_path)
-        elif choice == "4":
-            menu_decode(data, db_path)
-        else:
-            print("  Unknown choice, try again.")
+
+@app.get("/roofline/prefill/layer/{layer}")
+def roofline_prefill_layer(layer: int):
+    """Specific transformer layer for prefill (from DB)."""
+    if not db_available():
+        raise HTTPException(status_code=503, detail="Database not available.")
+    layers = get_layer_numbers("prefill")
+    if layer not in layers:
+        raise HTTPException(status_code=404, detail=f"Layer {layer} not found. Available: {layers}")
+    return roofline_from_db_layer("prefill", layer, label=f"Prefill layer {layer}")
+
+
+@app.get("/roofline/decode")
+def roofline_decode():
+    """Entire decode phase."""
+    json_path = find_decoder_block_json()
+    if not json_path:
+        raise HTTPException(status_code=404, detail="decoder-block-view.json not found.")
+    data   = load_json(json_path)
+    blocks = get_blocks(data, "Decode")
+    if not blocks:
+        raise HTTPException(status_code=404, detail="No Decode blocks found.")
+    agg = sum_blocks(blocks)
+    return roofline_from_aggregated(agg, "Entire Decode")
+
+
+@app.get("/roofline/decode/{block_id}")
+def roofline_decode_block(block_id: int):
+    """Specific decode block by block_id (from JSON)."""
+    json_path = find_decoder_block_json()
+    if not json_path:
+        raise HTTPException(status_code=404, detail="decoder-block-view.json not found.")
+    data  = load_json(json_path)
+    block = get_block(data, "Decode", block_id)
+    if not block:
+        raise HTTPException(status_code=404, detail=f"Decode block {block_id} not found.")
+    agg = {
+        "total_flops" : block["FLOPs"],
+        "dram_bytes"  : block["bytes_moved"],
+        "time_seconds": block["runtime_ns"] / 1e9,
+    }
+    return roofline_from_aggregated(agg, f"Decode block {block_id}")
+
+
+@app.get("/roofline/decode/{token_index}/layer/{layer}")
+def roofline_decode_layer(token_index: int, layer: int):
+    """Specific transformer layer for a decode token (from DB)."""
+    if not db_available():
+        raise HTTPException(status_code=503, detail="Database not available.")
+    tokens = get_decode_token_indices()
+    if token_index not in tokens:
+        raise HTTPException(status_code=404, detail=f"Token {token_index} not found. Available: {tokens}")
+    layers = get_layer_numbers("decode", token_index=token_index)
+    if layer not in layers:
+        raise HTTPException(status_code=404, detail=f"Layer {layer} not found. Available: {layers}")
+    turn = token_index // 1000
+    pos  = token_index % 1000
+    return roofline_from_db_layer(
+        "decode", layer,
+        token_index=token_index,
+        label=f"Decode turn {turn} pos {pos} layer {layer}",
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
-def main():
-    db_path = DB_PATH
-
-    json_path = find_decoder_block_json()
-    if not json_path:
-        print(f"{RED}[ERROR]{RESET} decoder-block-view.json not found in {RESULTS_DIR}")
-        sys.exit(1)
-
-    print(f"{CYAN}[INFO]{RESET} Detecting hardware ceiling...")
-    get_hardware()
-
-    print(f"{CYAN}[INFO]{RESET} Loading {json_path}")
-    data = load_json(json_path)
-
-    if not db_available(db_path):
-        print(f"{YELLOW}[WARN]{RESET} Database not found — layer analysis unavailable until next run.")
-
-    menu_loop(data, json_path, db_path)
-
-
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nExiting.")
+    import uvicorn
+    uvicorn.run("Roofline-api:app", host="0.0.0.0", port=8000, reload=False)
