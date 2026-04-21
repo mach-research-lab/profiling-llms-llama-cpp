@@ -464,6 +464,60 @@ def get_cache_miss_summary(
     return _fetchall(sql, tuple(params), db_path=db_path)
 
 
+def get_total_l1_dcm(
+    run_id: Optional[int] = None,
+    phase: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> int:
+    """
+    Sum of PAPI_L1_DCM across all tensors in the database.
+    Optionally filter by run_id and/or phase ('prefill' or 'decode').
+    Returns 0 if the counter was never recorded.
+    """
+    sql = """
+        SELECT COALESCE(SUM(p.papi_value), 0) AS total
+        FROM event_item e
+        JOIN event_papi_counter p ON e.event_item_id = p.event_item_id
+        WHERE p.papi_event_name = 'PAPI_L1_DCM'
+    """
+    params: list = []
+    if run_id is not None:
+        sql += " AND e.run_id = ?"
+        params.append(run_id)
+    if phase is not None:
+        sql += " AND e.event_phase = ?"
+        params.append(phase)
+
+    row = _fetchone(sql, tuple(params), db_path=db_path)
+    return int(row["total"]) if row else 0
+
+def get_total_l3_tcm(
+    run_id: Optional[int] = None,
+    phase: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> int:
+    """
+    Sum of PAPI_L3_TCM across all tensors in the database.
+    Optionally filter by run_id and/or phase ('prefill' or 'decode').
+    Returns 0 if the counter was never recorded.
+    """
+    sql = """
+        SELECT COALESCE(SUM(p.papi_value), 0) AS total
+        FROM event_item e
+        JOIN event_papi_counter p ON e.event_item_id = p.event_item_id
+        WHERE p.papi_event_name = 'PAPI_L3_TCM'
+    """
+    params: list = []
+    if run_id is not None:
+        sql += " AND e.run_id = ?"
+        params.append(run_id)
+    if phase is not None:
+        sql += " AND e.event_phase = ?"
+        params.append(phase)
+
+    row = _fetchone(sql, tuple(params), db_path=db_path)
+    return int(row["total"]) if row else 0
+
 def get_papi_per_token(
     papi_event: str,
     run_id: int,

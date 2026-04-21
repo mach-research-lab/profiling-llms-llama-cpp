@@ -54,7 +54,8 @@ static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
 
     if (ask) {
         data->t_start = now_ns();
-        PAPI_start(data->papi_event_set);
+        // UPDATED: Zero out the running counters instead of starting them
+        PAPI_reset(data->papi_event_set); 
         return true;
     }
 
@@ -67,7 +68,9 @@ static bool my_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
     }
 
     std::vector<long long> papi_values(papi_values_length, 0);
-    PAPI_stop(data->papi_event_set, papi_values.data());
+    
+    // UPDATED: Read the counters that have accumulated since PAPI_reset
+    PAPI_read(data->papi_event_set, papi_values.data()); 
 
     int64_t      duration_ns = now_ns() - data->t_start;
     size_t       tensor_size = ggml_nbytes(t);
@@ -372,6 +375,12 @@ int main(int argc, char ** argv) {
         }
         custom_print(custom_args.disable_prints, false, "PAPI: added event %s\n", name.c_str());
     }
+    
+    // UPDATED: Start the counters once globally
+    if (PAPI_start(cb_data.papi_event_set) != PAPI_OK) {
+        fprintf(stderr, "PAPI start error!\n");
+        return 1;
+    }
 
     // --- Open CSV and write dynamic header ---
     if(!no_csv){
@@ -580,7 +589,13 @@ int main(int argc, char ** argv) {
         free(const_cast<char *>(msg.content));
     }
     common_sampler_free(smpl);
+  
     if(!no_csv) fclose(cb_data.out_file);
+  
+    // UPDATED: Cleanly stop the running counters before cleanup
+    std::vector<long long> dummy_values(cb_data.n_events, 0);
+    PAPI_stop(cb_data.papi_event_set, dummy_values.data());
+    
     PAPI_destroy_eventset(&cb_data.papi_event_set);
     PAPI_shutdown();
 
