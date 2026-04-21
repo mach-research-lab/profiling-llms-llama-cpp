@@ -493,7 +493,7 @@ def main():
 
     configuration = Config(
         model_path,
-        [e[0] for e in events], #Removing description tag ('PAPI_*', 'Description...') -> ('PAPI_*')
+        [e[0] for e in events] if events else None, #Removing description tag ('PAPI_*', 'Description...') -> ('PAPI_*')
         prompt,
         n_predict,
         k_cache_type,
