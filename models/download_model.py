@@ -15,6 +15,7 @@ Examples:
 
 import argparse
 import sys
+import os
 from pathlib import Path
 
 try:
@@ -30,7 +31,7 @@ except ImportError:
     sys.exit(1)
 
 
-DEFAULT_OUTPUT_DIR = Path.home() / "models"
+DEFAULT_OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))+ "/models"
 
 
 def human_size(num_bytes: float) -> str:
