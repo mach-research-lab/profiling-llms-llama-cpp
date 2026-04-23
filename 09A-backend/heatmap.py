@@ -16,9 +16,9 @@ Supported heatmaps:
        y = op_type
        value = TOT_INS / TOT_CYC
     4. op-share
-       x = phase
+       x = metric (prefill, decode, delta_time)
        y = op_type
-       value = share of total time in each phase
+       value = absolute time comparison between prefill and decode
 """
 
 from __future__ import annotations
@@ -352,7 +352,8 @@ def build_operation_share_matrix(
     top_n: int | None = 20,
 ) -> pd.DataFrame:
     time_column = resolve_time_column(df)
-    filtered = filter_phases(df, phases)
+    selected_phases = phases if phases else ["prefill", "decode"]
+    filtered = filter_phases(df, selected_phases)
     aggregated = (
         filtered.groupby(["phase", "op_type"], as_index=False)[time_column]
         .sum()
@@ -360,15 +361,10 @@ def build_operation_share_matrix(
     )
     aggregated = select_top_operations(aggregated, time_column, top_n=top_n)
 
-    phase_totals = aggregated.groupby("phase", as_index=False)[time_column].sum()
-    phase_totals = phase_totals.rename(columns={time_column: "phase_total"})
-    shares = aggregated.merge(phase_totals, on="phase", how="left")
-    shares["share"] = shares[time_column] / shares["phase_total"]
-
-    matrix = shares.pivot_table(
+    matrix = aggregated.pivot_table(
         index="op_type",
         columns="phase",
-        values="share",
+        values=time_column,
         aggfunc="sum",
         fill_value=0.0,
     )
@@ -376,10 +372,19 @@ def build_operation_share_matrix(
     column_by_lower = {str(col).strip().lower(): col for col in matrix.columns}
     decode_col = column_by_lower.get("decode")
     prefill_col = column_by_lower.get("prefill")
-    if decode_col is not None and prefill_col is not None:
-        matrix["delta_share"] = matrix[decode_col] - matrix[prefill_col]
 
-    op_order = matrix.sum(axis=1).sort_values(ascending=False).index
+    if prefill_col is not None:
+        matrix["prefill"] = matrix[prefill_col]
+    else:
+        matrix["prefill"] = 0.0
+    if decode_col is not None:
+        matrix["decode"] = matrix[decode_col]
+    else:
+        matrix["decode"] = 0.0
+    matrix["delta_time"] = matrix["decode"] - matrix["prefill"]
+
+    matrix = matrix[["prefill", "decode", "delta_time"]]
+    op_order = (matrix["prefill"] + matrix["decode"]).sort_values(ascending=False).index
     return matrix.reindex(op_order)
 
 
@@ -425,7 +430,8 @@ def build_heatmap_matrix(
 
     if kind in {"op-share", "operation-share", "share"}:
         matrix = build_operation_share_matrix(filtered, phases=phases, top_n=top_n)
-        return matrix, "Operation Share Heatmap", "Phase", "share"
+        time_column = resolve_time_column(filtered)
+        return matrix, "Phase Time Comparison Heatmap", "Metric", time_column
 
     raise ValueError(
         "Unknown heatmap kind. Expected one of: time, memory, ipc, op-share."
@@ -460,16 +466,20 @@ def plot_heatmap(
     ax.set_xticklabels(matrix.columns, rotation=45, ha="right")
     ax.set_yticklabels(matrix.index)
 
+    phase_compare_cols = {str(col).strip().lower(): idx for idx, col in enumerate(matrix.columns)}
+    prefill_col_idx = phase_compare_cols.get("prefill")
+    decode_col_idx = phase_compare_cols.get("decode")
+    is_phase_compare = prefill_col_idx is not None and decode_col_idx is not None
+
     if annotate:
-        is_share = value_label == "share"
         for row_index, row_name in enumerate(matrix.index):
             for col_index, col_name in enumerate(matrix.columns):
                 value = matrix.loc[row_name, col_name]
-                if is_share:
-                    if str(col_name).strip().lower() == "delta_share":
-                        label = f"{value * 100.0:+.1f}pp"
+                if is_phase_compare:
+                    if str(col_name).strip().lower() == "delta_time":
+                        label = f"{value:+.0f}"
                     else:
-                        label = f"{value:.1%}"
+                        label = f"{value:.0f}"
                 else:
                     label = f"{value:.0f}"
                 ax.text(
@@ -544,14 +554,14 @@ def create_heatmap(
         title=title,
         xlabel=xlabel,
         value_label=value_label,
-        annotate=annotate or value_label == "share",
+        annotate=annotate,
     )
     return matrix, plot_path
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Create analysis heatmaps for time, memory pressure, IPC and operation share."
+        description="Create analysis heatmaps for time, memory pressure, IPC and phase time comparison."
     )
     parser.add_argument("--csv", dest="csv_path", help="Path to measurements.csv")
     parser.add_argument(
@@ -564,7 +574,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--kind",
         default="time",
         choices=["time", "memory", "ipc", "op-share"],
-        help="Which heatmap to build",
+        help="Which heatmap to build (op-share compares absolute prefill/decode time)",
     )
     parser.add_argument(
         "--phase",
@@ -747,28 +757,22 @@ def prompt_interactive_args() -> argparse.Namespace:
         csv_path = csv_candidates[csv_choice - 1]
 
     kind_options = ["time", "memory", "ipc", "op-share"]
+    kind_labels = {
+        "time": "time heatmap",
+        "memory": "memory heatmap",
+        "ipc": "ipc heatmap",
+        "op-share": "phase-compare heatmap (prefill vs decode)",
+    }
     kind_choice = _prompt_choice(
         "Choose heatmap kind:",
-        options=[f"{name} heatmap" for name in kind_options],
+        options=[kind_labels[name] for name in kind_options],
         default_index=1,
     )
     kind = kind_options[kind_choice - 1]
 
     phases = None
     if kind == "op-share":
-        phase_choice = _prompt_choice(
-            "Choose phase filter:",
-            options=[
-                "All phases",
-                "Prefill only",
-                "Decode only",
-            ],
-            default_index=1,
-        )
-        if phase_choice == 2:
-            phases = ["prefill"]
-        elif phase_choice == 3:
-            phases = ["decode"]
+        phases = ["prefill", "decode"]
 
     return argparse.Namespace(
         csv_path=csv_path,
