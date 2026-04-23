@@ -131,7 +131,7 @@ def get_user_prompts(result_path: str) -> list[str]:
 
 
 #Function used to run specified view, is multibatch
-def run_view(config: Config, clean_folder: bool, type: Run_type, gather_prompts):
+def run_view(config: Config, clean_folder: bool, type: Run_type, gather_prompts, event_per_run: int | None = None):
 
     #Output storage
     output_dir = OUTPUT_PATH
@@ -145,9 +145,9 @@ def run_view(config: Config, clean_folder: bool, type: Run_type, gather_prompts)
 
     #If no custom PAPI events are given, run ENUM default events
     if config.custom_events is None:
-        event_groups = get_valid_runs_from_list(type.events)
+        event_groups = get_valid_runs_from_list(type.events, event_per_run)
     else:
-        event_groups = get_valid_runs_from_list(config.custom_events)
+        event_groups = get_valid_runs_from_list(config.custom_events, event_per_run)
         print(f"Custom events added: {config.custom_events}")
 
     #Run multiple times to collect all events
@@ -186,7 +186,7 @@ def run_view(config: Config, clean_folder: bool, type: Run_type, gather_prompts)
         
 
 #Runs every view with conversation mode, is multibatch
-def run_every_view(config: Config):
+def run_every_view(config: Config, event_per_tensor: int | None):
 
     #TOP VIEW START
     print("\n" + "="*5 + " Starting top view " + "="*5 + "\n")
@@ -206,7 +206,7 @@ def run_every_view(config: Config):
     #TENSOR-OP VIEW START
     print("\n" + "="*5 + " Starting decoder block view " + "="*5 + "\n")
     config.binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
-    run_view(config, False, Run_type.TENSOR_OP_VIEW, False)
+    run_view(config, False, Run_type.TENSOR_OP_VIEW, False, event_per_tensor)
 
     #Complement JSON:s with additional fields
     complement_phase_json(os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path),

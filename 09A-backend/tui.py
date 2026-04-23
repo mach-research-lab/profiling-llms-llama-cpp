@@ -479,6 +479,14 @@ def main():
         k_cache_type, v_cache_type = select_kv_cache_type()
         print(f"\nSelected KV cache type: {k_cache_type}, {v_cache_type}")
 
+
+    # ---- Limit how many events during tensor op measurements ----
+    events_per_run = None
+    if run_type == "conversation_all":
+        print("\nMaximum number of papi events during tensor measurements (default: unlimited)")
+        raw = input("> ").strip()
+        events_per_run = int(raw) if raw.isdigit() else None
+
     # ---- COMMON PROMPT AND N_PREDICT INPUT ----
     print("\nEnter your initial prompt:")
     prompt = input("> ").strip()
@@ -489,6 +497,8 @@ def main():
     raw = input("> ").strip()
     n_predict = int(raw) if raw.isdigit() else 64
 
+    
+    
 
 
     configuration = Config(
@@ -512,7 +522,7 @@ def main():
     elif run_type == "conversation":
         run_conversation_papi(model_path, events, prompt, n_predict, binary_path, storage_type, db_path)
     elif run_type == "conversation_all":
-        run_every_view(configuration)
+        run_every_view(configuration, events_per_run)
 
 
    
