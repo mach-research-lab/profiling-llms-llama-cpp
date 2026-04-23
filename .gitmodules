@@ -1,3 +1,8 @@
 [submodule "llama.cpp"]
 	path = llama.cpp
 	url = https://github.com/ggerganov/llama.cpp
+	branch = master
+[submodule "stream"]
+	path = stream
+	url = https://github.com/jeffhammond/STREAM
+	branch = master

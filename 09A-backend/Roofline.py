@@ -24,12 +24,11 @@ from typing import Optional
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 RESULTS_DIR = os.path.join(
-    os.path.expanduser("~"),
-    "09A", "profiling-llms-llama-cpp",
-    "run_every_view_results",
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "run_every_view_results",
 )
 DB_PATH = os.path.join(RESULTS_DIR, "tensor_op_view.db")
-STREAM_PATH      = os.path.expanduser("~/stream")
+STREAM_PATH      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "stream", "stream_c")
 CACHE_LINE_BYTES = 64
 PAPI_FLOPS       = "PAPI_FP_OPS"
 PAPI_L3_MISS     = "PAPI_L3_TCM"
