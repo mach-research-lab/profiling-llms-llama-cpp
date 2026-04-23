@@ -505,7 +505,7 @@ int main(int argc, char ** argv) {
         }
 
         // PHASE 2: Prefill/Decode user input
-        cb_data.phase       = (turn_number == 1) ? "prefill" : "decode";
+        cb_data.phase       = "prefill";
         cb_data.token_index = turn_number;
 
         if (llama_decode(ctx, llama_batch_get_one(new_tokens.data(), (int)new_tokens.size()))) {

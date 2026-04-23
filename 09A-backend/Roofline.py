@@ -160,11 +160,19 @@ def get_layer_numbers(phase: str, token_index: Optional[int] = None, db_path: st
 
 def get_decode_token_indices(db_path: str = DB_PATH) -> list[int]:
     rows = fetchall(
-        "SELECT DISTINCT event_token_index FROM event_item WHERE event_phase = 'decode' ORDER BY event_token_index",
+        "SELECT DISTINCT event_token_index FROM event_item WHERE event_phase = 'decode' AND event_token_index >= 1000 ORDER BY event_token_index",
         db_path=db_path,
     )
     return [r["event_token_index"] for r in rows]
 
+
+
+def get_prefill_turn_indices(db_path: str = DB_PATH) -> list[int]:
+    rows = fetchall(
+        "SELECT DISTINCT event_token_index FROM event_item WHERE event_phase = 'prefill' ORDER BY event_token_index",
+        db_path=db_path,
+    )
+    return [r["event_token_index"] for r in rows]
 
 def get_papi_sum_for_layer(
     papi_event: str,
@@ -378,8 +386,9 @@ def menu_prefill(data: list, db_path: str):
         print("=" * 44)
         print(f"  {BOLD}PREFILL{RESET}")
         print("=" * 44)
-        print("  1. Entire Prefill")
-        print("  2. Specific layer")
+        print("  1. Entire Prefill (all turns)")
+        print("  2. Specific prefill turn (from JSON)")
+        print("  3. Specific layer for a prefill turn (from DB)")
         print("  0. Back")
         print("=" * 44)
         choice = input("Choice: ").strip()
@@ -397,12 +406,55 @@ def menu_prefill(data: list, db_path: str):
             print_result(result)
 
         elif choice == "2":
+            blocks = get_blocks(data, "Prefill")
+            if not blocks:
+                print("  No Prefill blocks in JSON.")
+                continue
+            ids = [b["block_id"] for b in blocks]
+            print(f"\n  Available prefill turns: {ids}")
+            raw = input("  Enter block_id or press Enter to go back: ").strip()
+            if not raw:
+                continue
+            try:
+                bid = int(raw)
+            except ValueError:
+                print("  Invalid input.")
+                continue
+            block = get_block(data, "Prefill", bid)
+            if not block:
+                print(f"  Prefill turn {bid} not found.")
+                continue
+            agg = {
+                "total_flops" : block["FLOPs"],
+                "dram_bytes"  : block["bytes_moved"],
+                "time_seconds": block["runtime_ns"] / 1e9,
+            }
+            result = roofline_from_aggregated(agg, f"Prefill turn {bid}")
+            print_result(result)
+
+        elif choice == "3":
             if not db_available(db_path):
                 print(f"  {RED}[ERROR]{RESET} Database not found. Run the profiler first.")
                 continue
-            layers = get_layer_numbers("prefill", db_path=db_path)
+            turns = get_prefill_turn_indices(db_path)
+            if not turns:
+                print("  No prefill turns found in database.")
+                continue
+            print(f"\n  Available prefill turns: {turns}")
+            raw = input("  Enter turn number or press Enter to go back: ").strip()
+            if not raw:
+                continue
+            try:
+                turn = int(raw)
+            except ValueError:
+                print("  Invalid input.")
+                continue
+            if turn not in turns:
+                print(f"  Turn {turn} not found.")
+                continue
+            layers = get_layer_numbers("prefill", token_index=turn, db_path=db_path)
             if not layers:
-                print("  No layers found in database for prefill.")
+                print("  No layers found for this prefill turn.")
                 continue
             print(f"\n  Available layers: {layers[0]} – {layers[-1]}")
             raw = input("  Enter layer number or press Enter to go back: ").strip()
@@ -418,7 +470,8 @@ def menu_prefill(data: list, db_path: str):
                 continue
             result = roofline_from_db_layer(
                 "prefill", layer,
-                label=f"Prefill layer {layer}",
+                token_index=turn,
+                label=f"Prefill turn {turn} layer {layer}",
                 db_path=db_path,
             )
             print_result(result)

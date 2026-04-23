@@ -3,18 +3,19 @@
 Roofline-api.py — FastAPI backend for llama.cpp Roofline Analysis.
 
 Data sources:
-  JSON (decoder-block-view.json) — entire program, entire prefill, entire decode, specific decode block
-  Database (tensor_op_view.db)   — specific transformer layer (prefill or decode token)
+  JSON (decoder-block-view.json) — entire program, entire prefill, entire decode, specific blocks
+  Database (tensor_op_view.db)   — specific transformer layer (prefill turn or decode token)
 
 Endpoints:
   GET /hardware
-  GET /phases                                              → available blocks and tokens from JSON
-  GET /roofline/all                                        → entire program
-  GET /roofline/prefill                                    → entire prefill
-  GET /roofline/prefill/layer/{layer}                      → prefill layer (from DB)
-  GET /roofline/decode                                     → entire decode
-  GET /roofline/decode/{block_id}                          → specific decode block (from JSON)
-  GET /roofline/decode/{token_index}/layer/{layer}         → decode token + layer (from DB)
+  GET /phases                                                → available blocks and tokens
+  GET /roofline/all                                          → entire program (JSON)
+  GET /roofline/prefill                                      → entire prefill all turns (JSON)
+  GET /roofline/prefill/{block_id}                           → specific prefill turn (JSON)
+  GET /roofline/prefill/{turn}/layer/{layer}                 → prefill turn + layer (DB)
+  GET /roofline/decode                                       → entire decode (JSON)
+  GET /roofline/decode/{block_id}                            → specific decode block (JSON)
+  GET /roofline/decode/{token_index}/layer/{layer}           → decode token + layer (DB)
 
 Run:
   pip install fastapi uvicorn
@@ -160,9 +161,17 @@ def get_layer_numbers(phase: str, token_index: Optional[int] = None, db_path: st
     return sorted(layers)
 
 
+def get_prefill_turn_indices(db_path: str = DB_PATH) -> list[int]:
+    rows = fetchall(
+        "SELECT DISTINCT event_token_index FROM event_item WHERE event_phase = 'prefill' ORDER BY event_token_index",
+        db_path=db_path,
+    )
+    return [r["event_token_index"] for r in rows]
+
+
 def get_decode_token_indices(db_path: str = DB_PATH) -> list[int]:
     rows = fetchall(
-        "SELECT DISTINCT event_token_index FROM event_item WHERE event_phase = 'decode' ORDER BY event_token_index",
+        "SELECT DISTINCT event_token_index FROM event_item WHERE event_phase = 'decode' AND event_token_index >= 1000 ORDER BY event_token_index",
         db_path=db_path,
     )
     return [r["event_token_index"] for r in rows]
@@ -324,11 +333,8 @@ async def startup():
     print(f"[STARTUP] {hw['cpu_model']}")
     print(f"[STARTUP] Peak: {hw['peak_gflops']} GFLOPS | BW: {hw['mem_bw_gbs']} GB/s | Ridge: {hw['ridge_point']} FLOP/byte")
     json_path = find_decoder_block_json()
-    if json_path:
-        print(f"[STARTUP] JSON: {json_path}")
-    else:
-        print("[STARTUP WARN] decoder-block-view.json not found.")
-    print(f"[STARTUP] DB: {'found' if db_available() else 'not found'}\n")
+    print(f"[STARTUP] JSON: {json_path or 'NOT FOUND'}")
+    print(f"[STARTUP] DB  : {'found' if db_available() else 'not found'}\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -337,12 +343,13 @@ async def startup():
 
 @app.get("/hardware")
 def hardware():
+    """Hardware ceiling: peak FLOPS, memory bandwidth, ridge point."""
     return get_hardware()
 
 
 @app.get("/phases")
 def phases():
-    """Return available blocks and decode tokens for the UI."""
+    """Available blocks and tokens for UI dropdowns."""
     json_path = find_decoder_block_json()
     if not json_path:
         raise HTTPException(status_code=404, detail="decoder-block-view.json not found.")
@@ -350,11 +357,13 @@ def phases():
 
     prefill_blocks = [b["block_id"] for b in get_blocks(data, "Prefill")]
     decode_blocks  = [b["block_id"] for b in get_blocks(data, "Decode")]
+    prefill_turns  = get_prefill_turn_indices() if db_available() else []
     decode_tokens  = get_decode_token_indices() if db_available() else []
 
     return {
         "prefill_blocks" : prefill_blocks,
         "decode_blocks"  : decode_blocks,
+        "prefill_turns"  : prefill_turns,
         "decode_tokens"  : decode_tokens,
         "db_available"   : db_available(),
     }
@@ -362,18 +371,17 @@ def phases():
 
 @app.get("/roofline/all")
 def roofline_all():
-    """Entire program (prefill + decode combined)."""
+    """Entire program (prefill + decode combined) from JSON."""
     json_path = find_decoder_block_json()
     if not json_path:
         raise HTTPException(status_code=404, detail="decoder-block-view.json not found.")
     data = load_json(json_path)
-    agg  = sum_blocks(data)
-    return roofline_from_aggregated(agg, "Entire program")
+    return roofline_from_aggregated(sum_blocks(data), "Entire program")
 
 
 @app.get("/roofline/prefill")
 def roofline_prefill():
-    """Entire prefill phase."""
+    """Entire prefill phase (all turns) from JSON."""
     json_path = find_decoder_block_json()
     if not json_path:
         raise HTTPException(status_code=404, detail="decoder-block-view.json not found.")
@@ -381,24 +389,45 @@ def roofline_prefill():
     blocks = get_blocks(data, "Prefill")
     if not blocks:
         raise HTTPException(status_code=404, detail="No Prefill blocks found.")
-    agg = sum_blocks(blocks)
-    return roofline_from_aggregated(agg, "Entire Prefill")
+    return roofline_from_aggregated(sum_blocks(blocks), "Entire Prefill")
 
 
-@app.get("/roofline/prefill/layer/{layer}")
-def roofline_prefill_layer(layer: int):
-    """Specific transformer layer for prefill (from DB)."""
+@app.get("/roofline/prefill/{block_id}")
+def roofline_prefill_block(block_id: int):
+    """Specific prefill turn by block_id from JSON."""
+    json_path = find_decoder_block_json()
+    if not json_path:
+        raise HTTPException(status_code=404, detail="decoder-block-view.json not found.")
+    data  = load_json(json_path)
+    block = get_block(data, "Prefill", block_id)
+    if not block:
+        available = [b["block_id"] for b in get_blocks(data, "Prefill")]
+        raise HTTPException(status_code=404, detail=f"Prefill block {block_id} not found. Available: {available}")
+    agg = {
+        "total_flops" : block["FLOPs"],
+        "dram_bytes"  : block["bytes_moved"],
+        "time_seconds": block["runtime_ns"] / 1e9,
+    }
+    return roofline_from_aggregated(agg, f"Prefill turn {block_id}")
+
+
+@app.get("/roofline/prefill/{turn}/layer/{layer}")
+def roofline_prefill_layer(turn: int, layer: int):
+    """Specific transformer layer for a prefill turn from DB."""
     if not db_available():
         raise HTTPException(status_code=503, detail="Database not available.")
-    layers = get_layer_numbers("prefill")
+    turns = get_prefill_turn_indices()
+    if turn not in turns:
+        raise HTTPException(status_code=404, detail=f"Prefill turn {turn} not found. Available: {turns}")
+    layers = get_layer_numbers("prefill", token_index=turn)
     if layer not in layers:
         raise HTTPException(status_code=404, detail=f"Layer {layer} not found. Available: {layers}")
-    return roofline_from_db_layer("prefill", layer, label=f"Prefill layer {layer}")
+    return roofline_from_db_layer("prefill", layer, token_index=turn, label=f"Prefill turn {turn} layer {layer}")
 
 
 @app.get("/roofline/decode")
 def roofline_decode():
-    """Entire decode phase."""
+    """Entire decode phase from JSON."""
     json_path = find_decoder_block_json()
     if not json_path:
         raise HTTPException(status_code=404, detail="decoder-block-view.json not found.")
@@ -406,20 +435,20 @@ def roofline_decode():
     blocks = get_blocks(data, "Decode")
     if not blocks:
         raise HTTPException(status_code=404, detail="No Decode blocks found.")
-    agg = sum_blocks(blocks)
-    return roofline_from_aggregated(agg, "Entire Decode")
+    return roofline_from_aggregated(sum_blocks(blocks), "Entire Decode")
 
 
 @app.get("/roofline/decode/{block_id}")
 def roofline_decode_block(block_id: int):
-    """Specific decode block by block_id (from JSON)."""
+    """Specific decode block by block_id from JSON."""
     json_path = find_decoder_block_json()
     if not json_path:
         raise HTTPException(status_code=404, detail="decoder-block-view.json not found.")
     data  = load_json(json_path)
     block = get_block(data, "Decode", block_id)
     if not block:
-        raise HTTPException(status_code=404, detail=f"Decode block {block_id} not found.")
+        available = [b["block_id"] for b in get_blocks(data, "Decode")]
+        raise HTTPException(status_code=404, detail=f"Decode block {block_id} not found. Available: {available}")
     agg = {
         "total_flops" : block["FLOPs"],
         "dram_bytes"  : block["bytes_moved"],
@@ -430,7 +459,7 @@ def roofline_decode_block(block_id: int):
 
 @app.get("/roofline/decode/{token_index}/layer/{layer}")
 def roofline_decode_layer(token_index: int, layer: int):
-    """Specific transformer layer for a decode token (from DB)."""
+    """Specific transformer layer for a decode token from DB."""
     if not db_available():
         raise HTTPException(status_code=503, detail="Database not available.")
     tokens = get_decode_token_indices()
