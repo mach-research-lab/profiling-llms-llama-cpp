@@ -98,7 +98,7 @@ def _add_db_metrics(phase: dict, phase_name: str, run_id: int, db_path: str):
         phase["op_type_share"] = {
             r["event_operation_type"]: {
                 "count":           r["count"],
-                "count_share_pct": round(r["count"]        / total_count * 100, 2) if total_count else 0,
+                "count_share_pct": round(r["count"]         / total_count * 100, 2) if total_count else 0,
                 "total_time_us":   r["total_time_us"],
                 "time_share_pct":  round(r["total_time_us"] / total_time  * 100, 2) if total_time  else 0,
                 "avg_time_us":     r["avg_time_us"],
@@ -106,27 +106,35 @@ def _add_db_metrics(phase: dict, phase_name: str, run_id: int, db_path: str):
             for r in op_rows
         }
 
+    # --- Fetch IPC components per operation across all runs ---
+    ins_rows = get_papi_totals_by_operation(
+        papi_event="PAPI_TOT_INS", phase=phase_name, db_path=db_path  # no run_id = all runs
+    )
+    cyc_rows = get_papi_totals_by_operation(
+        papi_event="PAPI_TOT_CYC", phase=phase_name, db_path=db_path
+    )
+    ins_by_op = {r["event_operation_type"]: r["total_papi_value"] for r in ins_rows}
+    cyc_by_op = {r["event_operation_type"]: r["total_papi_value"] for r in cyc_rows}
+
     # --- Arithmetic intensity per operation from DB ---
     ai_rows = get_arithmetic_intensity_per_operation(run_id=run_id, phase=phase_name, db_path=db_path)
     if ai_rows and "op_type_share" in phase:
         for r in ai_rows:
-            op = r["event_operation_type"]
+            op  = r["event_operation_type"]
             if op in phase["op_type_share"]:
-                phase["op_type_share"][op]["intensity_ratio"]  = r["intensity_ratio"]
-                phase["op_type_share"][op]["total_bytes"]      = r["total_bytes"]
-                phase["op_type_share"][op]["total_elements"]   = r["total_elements"]
+                phase["op_type_share"][op]["intensity_ratio"] = r["intensity_ratio"]
+                phase["op_type_share"][op]["total_bytes"]     = r["total_bytes"]
+                phase["op_type_share"][op]["total_elements"]  = r["total_elements"]
 
-    # --- PAPI totals per operation for every recorded event ---
-    """available_papi = get_distinct_papi_events(db_path=db_path)
-    if available_papi and "op_type_share" in phase:
-        for event_name in available_papi:
-            papi_rows = get_papi_totals_by_operation(
-                papi_event=event_name, run_id=run_id, phase=phase_name, db_path=db_path
-            )
-            for r in papi_rows:
-                op = r["event_operation_type"]
-                if op in phase["op_type_share"]:
-                    phase["op_type_share"][op][event_name] = r["total_papi_value"] """
+                tot_ins = ins_by_op.get(op, 0)
+                tot_cyc = cyc_by_op.get(op, 0)
+                phase["op_type_share"][op]["tot_ins"] = tot_ins
+                phase["op_type_share"][op]["tot_cyc"] = tot_cyc 
+                phase["op_type_share"][op]["IPC"] = (
+                    round(tot_ins / tot_cyc, 4) if tot_cyc > 0 else None
+                )
+                
+
 
 
 def complement_phase_json(
