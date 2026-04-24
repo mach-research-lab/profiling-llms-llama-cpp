@@ -15,12 +15,38 @@ import shutil
 
 # Homemade module
 from event_retriever import get_available_events, get_valid_runs
+from run_handler import Config, run_every_view
+
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 LLAMA_ROOT  = os.path.dirname(SCRIPT_DIR)
-MODELS_ROOT = os.path.join(os.path.expanduser("~"), "shared/models")
+MODELS_ROOT = os.path.join(LLAMA_ROOT, "models/models")
 
 AVAILABLE_EVENTS = get_available_events()
+
+#Used for selecting storage type (database, file, or both)
+def select_storage_type():
+    storage_types = {
+        "1": ("file", "Save to CSV file only"),
+        "2": ("database", "Save to SQLite database only"),
+        "3": ("both", "Save to both CSV file and database"),
+    }
+
+    print("\nSelect storage type:")
+    for key, (_, desc) in storage_types.items():
+        print(f"  {key}. {desc}")
+
+    while True:
+        raw = input("> ").strip()
+        if raw not in storage_types:
+            print("Invalid choice. Enter 1, 2, or 3.")
+            continue
+
+        key, desc = storage_types[raw]
+        print(f"\n  ✓ {desc}")
+        confirm = input("Confirm? (y/n): ").strip().lower()
+        if confirm == "y":
+            return key
 
 #Used for selecting run type (PAPI events, energy, KV cache or everything)
 def select_run_type():
@@ -30,6 +56,7 @@ def select_run_type():
         "3": ("kv",     "KV cache footprint"),
         "4": ("all",    "Run all (Multi-batch with event groups)"),
         "5": ("conversation", "Conversation mode with PAPI events"),
+        "6": ("conversation_all", "Conversation with specified or default PAPI events (Multibatch)")
     }
 
     print("\nSelect run type:")
@@ -39,7 +66,7 @@ def select_run_type():
     while True:
         raw = input("> ").strip()
         if raw not in run_types:
-            print("Invalid choice. Enter 1, 2, 3, 4, or 5.")
+            print("Invalid choice. Enter 1, 2, 3, 4, 5, 6")
             continue
 
         key, desc = run_types[raw]
@@ -59,9 +86,27 @@ def print_events():
         print(f"║  {i+1:2d}. {name:<12} — {desc:<100}║")
     print("╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
 
-def select_events():
+def select_events(run_type:str):
+    if run_type == "conversation_all":
+        print("\n Use default events [1] or choose custom [2]")
+        print("  1. Yes, use defaults")
+        print("  2. No, specify manually")
+        while True:
+            raw = input("> ").strip()
+            if raw == "" or raw == "1":
+                return None
+            elif raw == "2":
+                return select_events_helper()
+            else:
+                print("Invalid choice. Enter 1 or 2.")
+    
+    else:
+        return select_events_helper()
+        
+def select_events_helper():
     print_events()
     print("\nSelect up to 4 events (enter numbers separated by commas, e.g. 1,2,8,24):")
+    
     while True:
         raw = input("> ").strip()
         parts = [p.strip() for p in raw.split(",")]
@@ -84,34 +129,50 @@ def select_events():
         if confirm == "y":
             return selected
 
-#--------- KV cache footprint  ---------
-def detect_cache_type(model_path: str) -> str:
-    """
-    Detect KV cache type from the model filename.
-    Maps common quantization suffixes to llama.cpp cache type names.
-    Falls back to f16 if nothing matches.
-    """
-    name = os.path.basename(model_path).lower()
+#--------- KV cache dtype selection  ---------
+def select_kv_cache_type():
+    cache_types = {
+        "1": ("f16",  "FP16 (default, recommended)"),
+        "2": ("f32",  "FP32 (higher precision, more memory)"),
+        "3": ("q8_0", "Q8_0 (quantized, less memory)"),
+        "4": ("q4_0", "Q4_0 (quantized, least memory)"),
+    }
 
-    # Map filename patterns to cache type
-    patterns = [
-        ("q8_0",  "q8_0"),
-        ("q6_k",  "q8_0"),   # Q6_K weights → use q8_0 cache (best match)
-        ("q4_k",  "q8_0"),   # Q4_K weights → use q8_0 cache
-        ("q4_0",  "q4_0"),
-        ("q5_0",  "q8_0"),
-        ("q5_k",  "q8_0"),
-        ("f32",   "f32"),
-        ("fp32",  "f32"),
-        ("f16",   "f16"),
-        ("fp16",  "f16"),
-    ]
+    print("\nUse default KV cache types? (F16 for both K and V)")
+    print("  1. Yes, use defaults")
+    print("  2. No, specify manually")
+    while True:
+        raw = input("> ").strip()
+        if raw == "" or raw == "1":
+            print("\n  ✓ K-cache: f16, V-cache: f16 (defaults)")
+            return "f16", "f16"
+        elif raw == "2":
+            break
+        else:
+            print("Invalid choice. Enter 1 or 2.")
 
-    for pattern, cache_type in patterns:
-        if pattern in name:
-            return cache_type
+    selected = {}
+    for cache in ("K", "V"):
+        print(f"\nSelect {cache}-cache data type:")
+        for key, (_, desc) in cache_types.items():
+            print(f"  {key}. {desc}")
 
-    return "f16"  # default
+        while True:
+            raw = input("> ").strip()
+            if raw == "":
+                raw = "1"  # default to f16
+            if raw not in cache_types:
+                print("Invalid choice. Enter 1, 2, 3, or 4.")
+                continue
+            cache_type, desc = cache_types[raw]
+            print(f"\n  ✓ {desc}")
+            confirm = input("Confirm? (y/n): ").strip().lower()
+            if confirm == "y":
+                selected[cache] = cache_type
+                break
+
+    print(f"\n  ✓ K-cache: {selected['K']}, V-cache: {selected['V']}")
+    return selected["K"], selected["V"]
 
 
 #--------- Common functions ---------
@@ -125,14 +186,14 @@ def select_model():
         print(f"No .gguf models found in {MODELS_ROOT}")
         sys.exit(1)
 
-    print("\n╔══════════════════════════════════════════════════════════════════════╗")
-    print("║                        Available models                              ║")
-    print("╠══════════════════════════════════════════════════════════════════════╣")
+    print("\n╔══════════════════════════════════════════════════════════════════════════════════╗")
+    print("║                                  Available models                                ║")
+    print("╠══════════════════════════════════════════════════════════════════════════════════╣")
     for i, path in enumerate(models):
         rel = os.path.relpath(path, MODELS_ROOT)
         display = rel if len(rel) <= 68 else "..." + rel[-65:]
         print(f"║  {i+1:2d}. {display:<64}║")
-    print("╚══════════════════════════════════════════════════════════════════════╝")
+    print("╚══════════════════════════════════════════════════════════════════════════════════╝")
 
     print("\nSelect a model (enter number):")
     while True:
@@ -158,7 +219,7 @@ def check_binary(binary_path):
         return True
 
 #Used for running llama-papi
-def run_single_papi(model_path, events, prompt, n_predict, binary_path):
+def run_single_papi(model_path, events, prompt, n_predict, binary_path, storage_type="file", db_path="profiling_data.db"):
     event_names = [e[0] for e in events]
     events_arg = ",".join(event_names)
 
@@ -173,11 +234,15 @@ def run_single_papi(model_path, events, prompt, n_predict, binary_path):
         "--log-disable",
     ]
 
+    # Add database flags based on storage type
+    if storage_type in ["database", "both"]:
+        cmd.extend(["--use-db", "--db-path", db_path])
+
     print(f"\nRunning: {' '.join(cmd)}\n")
     subprocess.run(cmd, cwd=LLAMA_ROOT)
 
 #Used for running llama-papi in conversation mode
-def run_conversation_papi(model_path, events, prompt, n_predict, binary_path):
+def run_conversation_papi(model_path, events, prompt, n_predict, binary_path, storage_type="file", db_path="profiling_data.db"):
     event_names = [e[0] for e in events]
     events_arg = ",".join(event_names)
 
@@ -193,6 +258,10 @@ def run_conversation_papi(model_path, events, prompt, n_predict, binary_path):
         "--log-disable",
     ]
 
+    # Add database flags based on storage type
+    if storage_type in ["database", "both"]:
+        cmd.extend(["--use-db", "--db-path", db_path])
+
     print(f"\nStarting conversation mode...")
     print(f"Running: {' '.join(cmd)}\n")
     print("You can type 'quit' or 'exit' to end the conversation.\n")
@@ -201,15 +270,15 @@ def run_conversation_papi(model_path, events, prompt, n_predict, binary_path):
     subprocess.run(cmd, cwd=LLAMA_ROOT)
 
 #Used for running kv-measure
-def run_kv_measurement(model_path, prompt, n_predict, cache_type, binary_path):
+def run_kv_measurement(model_path, prompt, n_predict, k_cache_type, v_cache_type, binary_path):
     cmd = [
         binary_path,
         "--result-path", "kv_sizes.csv",
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),
-        "--cache-type-k", cache_type,
-        "--cache-type-v", cache_type,
+        "--cache-type-k", k_cache_type,
+        "--cache-type-v", v_cache_type,
         "--temp", "0",  # fixed temp for consistent measurements
         "--log-disable",
     ]
@@ -252,8 +321,9 @@ def run_energy(model_path, prompt, n_predict, binary_path):
     else:
         print("\n  ✗ energy.csv not found after run.")
 
+
 # --------- RUN ALL (Multi-batch with event groups) ---------
-def run_all(model_path, prompt, n_predict, cache_type):
+def run_all(model_path, prompt, n_predict, k_cache_type, v_cache_type, storage_type="file", db_path="profiling_data.db"):
     # Remove existing directory and recreate it fresh
     output_dir = os.path.join(LLAMA_ROOT, "run_all_results")
     if os.path.exists(output_dir):
@@ -283,6 +353,10 @@ def run_all(model_path, prompt, n_predict, cache_type):
             "--temp", "0",  # fixed temp for consistent measurements
             "--log-disable",
         ]
+
+        # Add database flags based on storage type
+        if storage_type in ["database", "both"]:
+            cmd.extend(["--use-db", "--db-path", db_path])
 
         print(f"\nRunning group {i+1}/{len(event_groups)}: {' '.join(cmd)}\n")
         result = subprocess.run(cmd, cwd=LLAMA_ROOT)
@@ -334,8 +408,8 @@ def run_all(model_path, prompt, n_predict, cache_type):
         "-m", model_path,
         "-p", prompt,
         "-n", str(n_predict),
-        "--cache-type-k", cache_type,
-        "--cache-type-v", cache_type,
+        "--cache-type-k", k_cache_type,
+        "--cache-type-v", v_cache_type,
         "--temp", "0",  # fixed temp for consistent measurements
         "--log-disable",
     ]
@@ -354,9 +428,6 @@ def run_all(model_path, prompt, n_predict, cache_type):
         print(f"\n  ✗ kv_measurement.csv not found after run.")
 
 
-
-
-
 def main():
     print("═" * 66)
     print("   llama.cpp Profiler")
@@ -366,6 +437,14 @@ def main():
 
     run_type = select_run_type()
     print(run_type)
+
+    # Select storage type for PAPI-based measurements
+    storage_type = "file"  # Default for energy and KV measurements
+    db_path = os.path.join(LLAMA_ROOT, "profiling_data.db")
+
+    if run_type in ["single", "conversation", "all"]:
+        storage_type = select_storage_type()
+
     #Add path to the correct binary based on the run type
     if run_type == "energy":
         binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-energy")
@@ -378,8 +457,10 @@ def main():
     elif run_type == "conversation":
         binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
 
+    # conversation_all resolves binary path
+
     # Check if the selected binary exists
-    if(not check_binary(binary_path)):
+    if run_type != "conversation_all" and (not check_binary(binary_path)):
         print(f"Binary not found: {binary_path}")
         print("Please compile binaries in /09A-backend/llama-measuring first.")
         sys.exit(1)
@@ -388,14 +469,23 @@ def main():
 
     #If single batch with PAPI events or conversation mode, allow event selection. Otherwise skip to prompt input.
     events = []
-    if run_type == "single" or run_type == "conversation":
-        events = select_events()
+    if run_type == "single" or run_type == "conversation" or run_type == "conversation_all":
+        events = select_events(run_type)
 
     #If KV cache measurement, detect cache type from model name. Otherwise skip to prompt input.
-    cache_type = None
-    if run_type == "kv" or run_type == "all":
-        cache_type = detect_cache_type(model_path)
-        print(f"\nDetected KV cache type: {cache_type}")
+    k_cache_type = None
+    v_cache_type = None
+    if run_type == "kv" or run_type == "all" or run_type == "conversation_all":
+        k_cache_type, v_cache_type = select_kv_cache_type()
+        print(f"\nSelected KV cache type: {k_cache_type}, {v_cache_type}")
+
+
+    # ---- Limit how many events during tensor op measurements ----
+    events_per_run = None
+    if run_type == "conversation_all":
+        print("\nMaximum number of papi events during tensor measurements (default: unlimited)")
+        raw = input("> ").strip()
+        events_per_run = int(raw) if raw.isdigit() else None
 
     # ---- COMMON PROMPT AND N_PREDICT INPUT ----
     print("\nEnter your initial prompt:")
@@ -407,16 +497,35 @@ def main():
     raw = input("> ").strip()
     n_predict = int(raw) if raw.isdigit() else 64
 
+    
+    
+
+
+    configuration = Config(
+        model_path,
+        [e[0] for e in events] if events else None, #Removing description tag ('PAPI_*', 'Description...') -> ('PAPI_*')
+        prompt,
+        n_predict,
+        k_cache_type,
+        v_cache_type,
+        binary_path
+    )
+
     if run_type == "single":
-        run_single_papi(model_path, events, prompt, n_predict, binary_path)
+        run_single_papi(model_path, events, prompt, n_predict, binary_path, storage_type, db_path)
     elif run_type == "kv":
-        run_kv_measurement(model_path, prompt, n_predict, cache_type, binary_path)
+        run_kv_measurement(model_path, prompt, n_predict, k_cache_type, v_cache_type, binary_path)
     elif run_type == "energy":
         run_energy(model_path, prompt, n_predict, binary_path)
     elif run_type == "all":
-        run_all(model_path, prompt, n_predict, cache_type)
+        run_all(model_path, prompt, n_predict, k_cache_type, v_cache_type, storage_type, db_path)
     elif run_type == "conversation":
-        run_conversation_papi(model_path, events, prompt, n_predict, binary_path)
+        run_conversation_papi(model_path, events, prompt, n_predict, binary_path, storage_type, db_path)
+    elif run_type == "conversation_all":
+        run_every_view(configuration, events_per_run)
+
+
+   
 
 
 if __name__ == "__main__":

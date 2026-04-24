@@ -107,8 +107,7 @@ def validate_run(event_group):
     return False, None
 
 #Helper to build_vaiid runs, merging smaller ones together if they fit within capacity
-def merge_runs(validated_runs, capacity, event_costs):
-    # Sort runs by size ascending so small ones get merged first
+def merge_runs(validated_runs, capacity, event_costs, max_events: int | None = None):
     runs = sorted(validated_runs, key=len)
     merged = []
 
@@ -117,6 +116,11 @@ def merge_runs(validated_runs, capacity, event_costs):
         base_cost = sum(event_costs.get(e, 1) for e in base)
         i = 0
         while i < len(runs):
+            # Skip merge if it would exceed max_events
+            if max_events is not None and len(base) + len(runs[i]) > max_events:
+                i += 1
+                continue
+
             candidate_cost = sum(event_costs.get(e, 1) for e in runs[i])
             if base_cost + candidate_cost <= capacity:
                 combined = base + runs[i]
@@ -188,6 +192,73 @@ def build_valid_runs():
 def get_valid_runs():
     return build_valid_runs()
 
+def build_valid_runs_from_list(event_list: list[str], max_events: int | None = None):
+    available_event_names = {name for name, _ in get_available_events()}
+    
+    filtered = []
+    for name in event_list:
+        if name not in available_event_names:
+            print(f"Warning: {name} is not available on this hardware, skipping.")
+            continue
+        filtered.append(name)
 
+    all_costs = {name: cost for name, cost in parse_available_event_with_hwc()}
+    events_with_cost = [(name, all_costs.get(name, 1)) for name in filtered]
+
+    proposed_runs = bin_pack_events(events_with_cost, get_hardware_counters())
+    event_costs = {name: cost for name, cost in events_with_cost}
+
+    validated_runs = []
+    overflow = []
+
+    for run in proposed_runs:
+        valid_run = []
+        rejected = []
+
+        for event in run:
+            # Enforce max_events cap before even attempting validation
+            if max_events is not None and len(valid_run) >= max_events:
+                rejected.append(event)
+                continue
+
+            candidate = valid_run + [event]
+            if len(candidate) == 1:
+                valid_run.append(event)
+                continue
+
+            is_valid, conflicting = validate_run(candidate)
+            if is_valid:
+                valid_run.append(event)
+            else:
+                if conflicting and conflicting in valid_run:
+                    swapped = [e for e in valid_run if e != conflicting] + [event]
+                    is_valid_swap, _ = validate_run(swapped)
+                    if is_valid_swap:
+                        valid_run = swapped
+                        rejected.append(conflicting)
+                        continue
+                rejected.append(event)
+
+        validated_runs.append(valid_run)
+        overflow.extend(rejected)
+
+    if overflow:
+        print(f"Re-packing {len(overflow)} conflicted events...")
+        overflow_pairs = [(e, event_costs.get(e, 1)) for e in overflow]
+        extra_runs = bin_pack_events(overflow_pairs, get_hardware_counters())
+        for run in extra_runs:
+            is_valid, _ = validate_run(run)
+            if is_valid:
+                validated_runs.append(run)
+            else:
+                for event in run:
+                    validated_runs.append([event])
+
+    validated_runs = merge_runs(validated_runs, get_hardware_counters(), event_costs, max_events)
+    print(f"Final run count after merging: {len(validated_runs)}")
+    return validated_runs
+
+def get_valid_runs_from_list(event_list: list[str], max_events: int | None = None):
+    return build_valid_runs_from_list(event_list, max_events)
 
 
