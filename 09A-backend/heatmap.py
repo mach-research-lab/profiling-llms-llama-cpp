@@ -4,35 +4,33 @@ Create profiler heatmaps for prefill/decode analysis.
 
 Supported heatmaps:
     1. time
-       x = layer
-       y = op_type
-       value = time spent
+       Runtime heatmap
     2. memory
-       x = layer
-       y = op_type
-       value = cache-miss pressure (prefers LLC/L3, then L2)
+       Memory pressure heatmap
     3. ipc
-       x = layer
-       y = op_type
-       value = TOT_INS / TOT_CYC
+       IPC heatmap
     4. op-share
-       x = metric (prefill, decode, delta_time)
-       y = op_type
-       value = absolute time comparison between prefill and decode
+       Phase-compare runtime heatmap
+    5. op-share-ipc
+       Phase-compare IPC heatmap
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import os
 import re
+import sqlite3
 import sys
-from collections import Counter
 from pathlib import Path
 from typing import Mapping
+
+try:
+    import db_queries
+except ImportError:  # pragma: no cover
+    db_queries = None
 
 try:
     import matplotlib
@@ -55,6 +53,9 @@ except ImportError:  # pragma: no cover
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+RESULTS_DIR = SCRIPT_DIR.parent / "run_every_view_results"
+DEFAULT_JSON_DIR = RESULTS_DIR
+DEFAULT_SQLITE_DB = RESULTS_DIR / "tensor_op_view.db"
 DEFAULT_OUTPUT = SCRIPT_DIR / "plots" / "heatmap.png"
 
 CANONICAL_COLUMNS = {
@@ -94,6 +95,90 @@ LAYER_PATTERNS = (
 
 def load_measurements_from_csv(csv_path: str | os.PathLike[str]) -> pd.DataFrame:
     return pd.read_csv(csv_path)
+
+
+def load_measurements_from_sqlite_db(
+    db_path: str | os.PathLike[str],
+    sql: str | None = None,
+) -> pd.DataFrame:
+    if db_queries is not None and sql is None:
+        rows = db_queries.get_events_with_papi(db_path=str(db_path))
+        if rows:
+            raw = pd.DataFrame.from_records(rows)
+        else:
+            raw = pd.DataFrame(
+                columns=[
+                    "event_phase",
+                    "event_token_index",
+                    "event_tensor_name",
+                    "event_operation_type",
+                    "event_time_microseconds",
+                    "event_size_bytes",
+                    "event_n_elements",
+                    "papi_event_name",
+                    "papi_value",
+                ]
+            )
+    else:
+        query = sql
+        if query is None:
+            query = """
+                SELECT
+                    event_phase,
+                    event_token_index,
+                    event_tensor_name,
+                    event_operation_type,
+                    event_time_microseconds,
+                    event_size_bytes,
+                    event_n_elements,
+                    papi_event_name,
+                    papi_value
+                FROM event_item
+                LEFT JOIN event_papi_counter USING (event_item_id)
+                ORDER BY event_item_id
+            """
+
+        with sqlite3.connect(db_path) as conn:
+            raw = pd.read_sql_query(query, conn)
+
+    if "papi_event_name" not in raw.columns or "papi_value" not in raw.columns:
+        return raw
+
+    base_columns = [
+        "event_phase",
+        "event_token_index",
+        "event_tensor_name",
+        "event_operation_type",
+        "event_time_microseconds",
+        "event_size_bytes",
+        "event_n_elements",
+    ]
+
+    base = raw[base_columns].drop_duplicates().reset_index(drop=True)
+    event_id_columns = [
+        "event_phase",
+        "event_token_index",
+        "event_tensor_name",
+        "event_operation_type",
+        "event_time_microseconds",
+        "event_size_bytes",
+        "event_n_elements",
+        "papi_event_name",
+    ]
+    grouped = (
+        raw.groupby(event_id_columns, dropna=False, as_index=False)["papi_value"]
+        .sum()
+    )
+    counters = grouped.pivot_table(
+        index=base_columns,
+        columns="papi_event_name",
+        values="papi_value",
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
+    counters.columns.name = None
+
+    return base.merge(counters, on=base_columns, how="left")
 
 
 def load_measurements_from_db(
@@ -181,6 +266,184 @@ def normalize_measurements(df: pd.DataFrame) -> pd.DataFrame:
 
     renamed = renamed[renamed["op_type"] != ""].copy()
     return renamed
+
+
+def load_json_file(path: str | os.PathLike[str]) -> object:
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def select_top_matrix_rows(matrix: pd.DataFrame, top_n: int | None) -> pd.DataFrame:
+    if top_n is None or top_n <= 0 or matrix.empty:
+        return matrix
+    order = matrix.sum(axis=1).sort_values(ascending=False)
+    return matrix.loc[order.head(top_n).index]
+
+
+def resolve_phase_view_path(results_dir: str | os.PathLike[str]) -> Path | None:
+    path = Path(results_dir) / "phase-view.json"
+    return path if path.is_file() else None
+
+
+def resolve_decoder_block_view_path(results_dir: str | os.PathLike[str]) -> Path | None:
+    path = Path(results_dir) / "decoder-block-view.json"
+    return path if path.is_file() else None
+
+
+def build_operation_share_matrix_from_phase_json(
+    phase_view_path: str | os.PathLike[str],
+    metric_name: str = "total_time_us",
+    phases: list[str] | None = None,
+    top_n: int | None = 20,
+) -> tuple[pd.DataFrame, str]:
+    raw = load_json_file(phase_view_path)
+    if not isinstance(raw, dict):
+        raise ValueError("phase-view.json must contain a JSON object.")
+
+    selected_phases = phases if phases else ["prefill", "decode"]
+    records: list[dict[str, object]] = []
+    for phase in selected_phases:
+        phase_payload = raw.get(phase)
+        if not isinstance(phase_payload, dict):
+            continue
+
+        op_type_share = phase_payload.get("op_type_share", {})
+        if not isinstance(op_type_share, dict):
+            continue
+
+        for op_type, metrics in op_type_share.items():
+            if not isinstance(metrics, dict):
+                continue
+            records.append(
+                {
+                    "phase": phase,
+                    "op_type": op_type,
+                    metric_name: float(metrics.get(metric_name, 0)),
+                }
+            )
+
+    if not records:
+        raise ValueError("phase-view.json does not contain op_type_share data.")
+
+    frame = pd.DataFrame.from_records(records)
+    matrix = frame.pivot_table(
+        index="op_type",
+        columns="phase",
+        values=metric_name,
+        aggfunc="sum",
+        fill_value=0.0,
+    )
+
+    if "prefill" not in matrix.columns:
+        matrix["prefill"] = 0.0
+    if "decode" not in matrix.columns:
+        matrix["decode"] = 0.0
+    delta_column = "delta_ipc" if metric_name == "IPC" else "delta_time"
+    matrix[delta_column] = matrix["decode"] - matrix["prefill"]
+    matrix = matrix[["prefill", "decode", delta_column]]
+    matrix = select_top_matrix_rows(matrix, top_n)
+    op_order = (matrix["prefill"] + matrix["decode"]).sort_values(ascending=False).index
+    value_label = "ipc" if metric_name == "IPC" else "time_us"
+    return matrix.reindex(op_order), value_label
+
+
+def block_label(block: Mapping[str, object]) -> str:
+    block_type = str(block.get("block_type", "block")).strip().lower()
+    block_id = int(block.get("block_id", 0))
+    prefix = "P" if block_type.startswith("prefill") else "D" if block_type.startswith("decode") else "B"
+    return f"{prefix}{block_id:02d}"
+
+
+def extract_decoder_metric(subcomponent: Mapping[str, object], heatmap_kind: str) -> float | None:
+    kind = heatmap_kind.strip().lower()
+    if kind == "time":
+        if "runtime_us" in subcomponent:
+            return float(subcomponent["runtime_us"])
+        if "runtime_ms" in subcomponent:
+            return float(subcomponent["runtime_ms"]) * 1000.0
+        if "runtime_ns" in subcomponent:
+            return float(subcomponent["runtime_ns"]) / 1000.0
+        return None
+
+    if kind in {"memory", "memory-pressure", "llc", "cache-misses"}:
+        cache_behavior = subcomponent.get("cache_behavior", {})
+        papi = subcomponent.get("papi", {})
+        if isinstance(cache_behavior, dict):
+            for key in ("L3_misses", "L2_misses", "L1_misses"):
+                if key in cache_behavior:
+                    return float(cache_behavior[key])
+        if isinstance(papi, dict):
+            for key in ("PAPI_L3_TCM", "PAPI_L2_TCM", "PAPI_L1_DCM"):
+                if key in papi:
+                    return float(papi[key])
+        return None
+
+    if kind == "ipc":
+        if "IPC" in subcomponent:
+            return float(subcomponent["IPC"])
+        papi = subcomponent.get("papi", {})
+        if isinstance(papi, dict):
+            cycles = float(papi.get("PAPI_TOT_CYC", 0))
+            instructions = float(papi.get("PAPI_TOT_INS", 0))
+            if cycles != 0:
+                return instructions / cycles
+        return None
+
+    raise ValueError(f"Unsupported JSON decoder metric for heatmap kind: {heatmap_kind}")
+
+
+def build_decoder_block_matrix_from_json(
+    decoder_block_path: str | os.PathLike[str],
+    heatmap_kind: str,
+    phases: list[str] | None = None,
+    top_n: int | None = 20,
+) -> tuple[pd.DataFrame, str]:
+    raw = load_json_file(decoder_block_path)
+    if not isinstance(raw, list):
+        raise ValueError("decoder-block-view.json must contain a JSON array.")
+
+    selected_phases = {phase.strip().lower() for phase in phases} if phases else None
+    records: list[dict[str, object]] = []
+
+    for block in raw:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("block_type", "")).strip().lower()
+        if selected_phases is not None and block_type not in selected_phases:
+            continue
+
+        subcomponents = block.get("subcomponents", {})
+        if not isinstance(subcomponents, dict) or not subcomponents:
+            subcomponents = {"block_total": block}
+
+        for name, subcomponent in subcomponents.items():
+            if not isinstance(subcomponent, dict):
+                continue
+            value = extract_decoder_metric(subcomponent, heatmap_kind)
+            if value is None:
+                continue
+            records.append(
+                {
+                    "component": str(name),
+                    "block": block_label(block),
+                    "value": value,
+                }
+            )
+
+    if not records:
+        raise ValueError("decoder-block-view.json does not contain the requested metric.")
+
+    frame = pd.DataFrame.from_records(records)
+    matrix = frame.pivot_table(
+        index="component",
+        columns="block",
+        values="value",
+        aggfunc="sum",
+        fill_value=0.0,
+    )
+    matrix = select_top_matrix_rows(matrix, top_n)
+    column_order = sorted(matrix.columns)
+    return matrix.reindex(columns=column_order), "ipc" if heatmap_kind == "ipc" else "time_us" if heatmap_kind == "time" else "papi_l3_tcm"
 
 
 def load_group_mapping(group_file: str | os.PathLike[str] | None) -> dict[str, str]:
@@ -476,12 +739,13 @@ def plot_heatmap(
             for col_index, col_name in enumerate(matrix.columns):
                 value = matrix.loc[row_name, col_name]
                 if is_phase_compare:
-                    if str(col_name).strip().lower() == "delta_time":
-                        label = f"{value:+.0f}"
+                    lowered_col = str(col_name).strip().lower()
+                    if lowered_col in {"delta_time", "delta_ipc"}:
+                        label = f"{value:+.2f}" if "ipc" in lowered_col else f"{value:+.0f}"
                     else:
-                        label = f"{value:.0f}"
+                        label = f"{value:.2f}" if "ipc" in lowered_col or value_label == "ipc" else f"{value:.0f}"
                 else:
-                    label = f"{value:.0f}"
+                    label = f"{value:.2f}" if value_label == "ipc" else f"{value:.0f}"
                 ax.text(
                     col_index,
                     row_index,
@@ -503,9 +767,8 @@ def plot_heatmap(
 
 def create_heatmap(
     *,
-    csv_path: str | os.PathLike[str] | None = None,
-    dsn: str | None = None,
-    run_id: int | None = None,
+    results_dir: str | os.PathLike[str] = DEFAULT_JSON_DIR,
+    db_path: str | os.PathLike[str] | None = DEFAULT_SQLITE_DB,
     sql: str | None = None,
     heatmap_kind: str = "time",
     phases: list[str] | None = None,
@@ -525,23 +788,50 @@ def create_heatmap(
             "matplotlib is not installed. Install it with `pip install matplotlib`."
         )
 
-    if csv_path is None and dsn is None:
-        raise ValueError("Provide either csv_path or dsn.")
+    kind = heatmap_kind.strip().lower()
+    phase_view_path = resolve_phase_view_path(results_dir)
+    decoder_block_path = resolve_decoder_block_view_path(results_dir)
 
-    if csv_path is not None:
-        measurements = load_measurements_from_csv(csv_path)
+    matrix: pd.DataFrame
+    title: str
+    xlabel: str
+    value_label: str
+
+    if kind in {"op-share", "operation-share", "share"} and phase_view_path is not None:
+        matrix, value_label = build_operation_share_matrix_from_phase_json(
+            phase_view_path,
+            metric_name="total_time_us",
+            phases=phases,
+            top_n=top_n,
+        )
+        title = "Phase Time Comparison Heatmap"
+        xlabel = "Metric"
+    elif kind in {"op-share-ipc", "ipc-share"} and phase_view_path is not None:
+        matrix, value_label = build_operation_share_matrix_from_phase_json(
+            phase_view_path,
+            metric_name="IPC",
+            phases=phases,
+            top_n=top_n,
+        )
+        title = "Phase IPC Comparison Heatmap"
+        xlabel = "Metric"
     else:
-        measurements = load_measurements_from_db(dsn=dsn, run_id=run_id, sql=sql)
+        resolved_db_path = Path(db_path) if db_path is not None else None
+        if resolved_db_path is None or not resolved_db_path.is_file():
+            raise ValueError(
+                "tensor_op_view.db is required for runtime, memory pressure and IPC heatmaps."
+            )
 
-    normalized = normalize_measurements(measurements)
-    grouped = apply_operation_groups(normalized, load_group_mapping(group_file))
-    matrix, title, xlabel, value_label = build_heatmap_matrix(
-        grouped,
-        heatmap_kind=heatmap_kind,
-        phases=phases,
-        top_n=top_n,
-        include_special_layers=include_special_layers,
-    )
+        measurements = load_measurements_from_sqlite_db(resolved_db_path, sql=sql)
+        normalized = normalize_measurements(measurements)
+        grouped = apply_operation_groups(normalized, load_group_mapping(group_file))
+        matrix, title, xlabel, value_label = build_heatmap_matrix(
+            grouped,
+            heatmap_kind=heatmap_kind,
+            phases=phases,
+            top_n=top_n,
+            include_special_layers=include_special_layers,
+        )
 
     if matrix_output_path is not None:
         matrix_output = Path(matrix_output_path)
@@ -561,20 +851,24 @@ def create_heatmap(
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Create analysis heatmaps for time, memory pressure, IPC and phase time comparison."
+        description="Create analysis heatmaps from run_every_view_results JSON outputs, with SQLite fallback."
     )
-    parser.add_argument("--csv", dest="csv_path", help="Path to measurements.csv")
     parser.add_argument(
-        "--dsn",
-        help="PostgreSQL DSN, for example postgresql://user:pass@localhost:5434/toolDB",
+        "--results-dir",
+        default=str(DEFAULT_JSON_DIR),
+        help="Directory containing phase-view.json, decoder-block-view.json and tensor_op_view.db",
     )
-    parser.add_argument("--run-id", type=int, help="Optional run_id filter when reading from DB")
-    parser.add_argument("--sql", help="Custom SQL query to use instead of the default event_item query")
+    parser.add_argument(
+        "--db-path",
+        default=str(DEFAULT_SQLITE_DB),
+        help="Optional SQLite fallback database path, typically run_every_view_results/tensor_op_view.db",
+    )
+    parser.add_argument("--sql", help="Custom SQL query to use when falling back to SQLite")
     parser.add_argument(
         "--kind",
         default="time",
-        choices=["time", "memory", "ipc", "op-share"],
-        help="Which heatmap to build (op-share compares absolute prefill/decode time)",
+        choices=["time", "memory", "ipc", "op-share", "op-share-ipc"],
+        help="Which heatmap to build (op-share compares time, op-share-ipc compares IPC between prefill and decode)",
     )
     parser.add_argument(
         "--phase",
@@ -672,96 +966,18 @@ def _prompt_choice(
         return selected
 
 
-def _csv_looks_like_measurements(csv_path: Path) -> bool:
-    try:
-        with csv_path.open("r", encoding="utf-8", newline="") as handle:
-            reader = csv.reader(handle)
-            header = next(reader, None)
-    except (OSError, UnicodeDecodeError):
-        return False
-
-    if not header:
-        return False
-
-    normalized = {column.strip().lower() for column in header}
-    has_phase = "phase" in normalized or "event_phase" in normalized
-    has_op_type = "op_type" in normalized or "event_operation_type" in normalized
-    return has_phase and has_op_type
-
-
-def _discover_csv_paths(limit: int = 12) -> list[str]:
-    roots = [Path.cwd(), SCRIPT_DIR, SCRIPT_DIR.parent]
-    seen: set[Path] = set()
-    targeted: list[Path] = []
-    preferred: list[Path] = []
-    fallback: list[Path] = []
-
-    def add_candidate(path: Path, bucket: list[Path]) -> None:
-        resolved = path.resolve()
-        if resolved in seen or not path.is_file():
-            return
-        seen.add(resolved)
-        bucket.append(path)
-
-    for root in roots:
-        if not root.exists():
-            continue
-
-        # First priority: explicit project CSVs users typically care about.
-        for path in sorted(root.rglob("measurements.csv")):
-            add_candidate(path, targeted)
-
-        run_all_results_dir = root / "run_all_results"
-        if run_all_results_dir.exists():
-            for path in sorted(run_all_results_dir.rglob("*.csv")):
-                add_candidate(path, targeted)
-
-    if targeted:
-        return [str(path) for path in targeted[:limit]]
-
-    for root in roots:
-        if not root.exists():
-            continue
-        for path in sorted(root.rglob("*.csv")):
-            if _csv_looks_like_measurements(path):
-                add_candidate(path, preferred)
-            else:
-                add_candidate(path, fallback)
-
-    combined = preferred + fallback
-    return [str(path) for path in combined[:limit]]
-
-
 def prompt_interactive_args() -> argparse.Namespace:
     print("Interactive heatmap quick setup")
     print("Answer with numbers.")
     print()
 
-    csv_candidates = _discover_csv_paths()
-    names = [Path(path).name for path in csv_candidates]
-    name_counts = Counter(names)
-    seen_name_counts: dict[str, int] = {}
-    csv_options: list[str] = []
-    for name in names:
-        if name_counts[name] == 1:
-            csv_options.append(f"Use {name}")
-            continue
-        seen_name_counts[name] = seen_name_counts.get(name, 0) + 1
-        csv_options.append(f"Use {name} ({seen_name_counts[name]})")
-    csv_options.append("Type a custom CSV path")
-    csv_choice = _prompt_choice("Choose CSV source:", options=csv_options, default_index=1)
-    if csv_choice == len(csv_options):
-        csv_path = _prompt_text("CSV path", required=True)
-        assert csv_path is not None
-    else:
-        csv_path = csv_candidates[csv_choice - 1]
-
-    kind_options = ["time", "memory", "ipc", "op-share"]
+    kind_options = ["time", "memory", "ipc", "op-share", "op-share-ipc"]
     kind_labels = {
-        "time": "time heatmap",
-        "memory": "memory heatmap",
-        "ipc": "ipc heatmap",
-        "op-share": "phase-compare heatmap (prefill vs decode)",
+        "time": "Runtime heatmap",
+        "memory": "Memory pressure heatmap",
+        "ipc": "IPC heatmap",
+        "op-share": "Phase-compare runtime heatmap",
+        "op-share-ipc": "Phase-compare IPC heatmap",
     }
     kind_choice = _prompt_choice(
         "Choose heatmap kind:",
@@ -771,13 +987,12 @@ def prompt_interactive_args() -> argparse.Namespace:
     kind = kind_options[kind_choice - 1]
 
     phases = None
-    if kind == "op-share":
+    if kind in {"op-share", "op-share-ipc"}:
         phases = ["prefill", "decode"]
 
     return argparse.Namespace(
-        csv_path=csv_path,
-        dsn=None,
-        run_id=None,
+        results_dir=str(DEFAULT_JSON_DIR),
+        db_path=str(DEFAULT_SQLITE_DB),
         sql=None,
         kind=kind,
         phases=phases,
@@ -797,13 +1012,9 @@ def main() -> None:
     else:
         args = parser.parse_args()
 
-    if not args.csv_path and not args.dsn:
-        parser.error("one of --csv or --dsn is required")
-
     matrix, plot_path = create_heatmap(
-        csv_path=args.csv_path,
-        dsn=args.dsn,
-        run_id=args.run_id,
+        results_dir=args.results_dir,
+        db_path=args.db_path,
         sql=args.sql,
         heatmap_kind=args.kind,
         phases=args.phases,
