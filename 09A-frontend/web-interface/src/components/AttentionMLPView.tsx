@@ -8,8 +8,20 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { motion } from 'motion/react';
+import { useAppState } from '@/src/controller/AppContext.tsx';
 
 export default function AttentionMLPView() {
+  const { state } = useAppState();
+  const {
+    memoryUsedGB, blockLatencyMs,
+    attentionRuntimeMs, attentionRuntimePct, attentionFlopsTrillion, attentionFlopsTrendPct,
+    attentionIntensity, attentionBytesMoved, attentionHitRate, attentionEnergyScore,
+    attentionL1, attentionL2,
+    mlpRuntimeMs, mlpRuntimePct, mlpFlopsTrillion, mlpFlopsTrendPct,
+    mlpIntensity, mlpBytesMoved, mlpHitRate, mlpEnergyScore, mlpL1, mlpL2,
+  } = state;
+  const fmt = (pct: number) => `${pct >= 0 ? '↑' : '↓'} ${Math.abs(pct)}%`;
+
   return (
     <div className="p-8 space-y-8 animate-in fade-in duration-500">
       <div className="flex justify-between items-end mb-8">
@@ -22,53 +34,53 @@ export default function AttentionMLPView() {
         <div className="flex gap-4">
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-primary">
             <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Block Latency</div>
-            <div className="text-xl font-headline font-bold text-primary">1.24ms</div>
+            <div className="text-xl font-headline font-bold text-primary">{blockLatencyMs}ms</div>
           </div>
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-secondary">
             <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">VRAM Context</div>
-            <div className="text-xl font-headline font-bold text-secondary">42.8 GB</div>
+            <div className="text-xl font-headline font-bold text-secondary">{memoryUsedGB} GB</div>
           </div>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* ATTENTION MODULE */}
-        <SubBlockSection 
+        <SubBlockSection
           title="ATTENTION SUB-BLOCK"
           icon={<Brain className="w-5 h-5 text-primary fill-current" />}
           badge="OPTIMIZED"
           badgeColor="text-primary bg-primary/10 border-primary/30"
-          runtime="0.52ms"
-          runtimePercent={42}
-          flops="12.4 T"
-          flopsTrend="↑ 8%"
-          intensity="14.7 FLOPs/Byte"
+          runtime={`${attentionRuntimeMs}ms`}
+          runtimePercent={attentionRuntimePct}
+          flops={`${attentionFlopsTrillion} T`}
+          flopsTrend={fmt(attentionFlopsTrendPct)}
+          intensity={`${attentionIntensity} FLOPs/Byte`}
           intensityPoint={{ x: 240, y: 80 }}
-          bytesMoved="842 MB"
-          hitRate={92}
-          energy="8.4/10"
-          l1={92}
-          l2={78}
+          bytesMoved={attentionBytesMoved}
+          hitRate={attentionHitRate}
+          energy={`${attentionEnergyScore}/10`}
+          l1={attentionL1}
+          l2={attentionL2}
           primaryColor="bg-primary"
         />
 
         {/* MLP MODULE */}
-        <SubBlockSection 
+        <SubBlockSection
           title="MLP SUB-BLOCK (FFN)"
           icon={<Cpu className="w-5 h-5 text-tertiary" />}
           badge="BOTTLENECK"
           badgeColor="text-tertiary bg-tertiary/10 border-tertiary/30"
-          runtime="0.72ms"
-          runtimePercent={58}
-          flops="42.1 T"
-          flopsTrend="↓ 12%"
-          intensity="17.5 FLOPs/Byte"
+          runtime={`${mlpRuntimeMs}ms`}
+          runtimePercent={mlpRuntimePct}
+          flops={`${mlpFlopsTrillion} T`}
+          flopsTrend={fmt(mlpFlopsTrendPct)}
+          intensity={`${mlpIntensity} FLOPs/Byte`}
           intensityPoint={{ x: 320, y: 80 }}
-          bytesMoved="2.4 GB"
-          hitRate={64}
-          energy="4.2/10"
-          l1={64}
-          l2={41}
+          bytesMoved={mlpBytesMoved}
+          hitRate={mlpHitRate}
+          energy={`${mlpEnergyScore}/10`}
+          l1={mlpL1}
+          l2={mlpL2}
           primaryColor="bg-tertiary"
           isWarning
         />
@@ -98,24 +110,6 @@ export default function AttentionMLPView() {
         </div>
       </div>
 
-      {/* Floating Alert */}
-      <div className="fixed bottom-8 right-8 z-50 bg-surface-variant/40 backdrop-blur-xl p-4 rounded-xl border border-outline-variant/20 shadow-2xl w-80">
-        <div className="flex items-center gap-3 mb-3">
-          <div className="w-10 h-10 rounded-full bg-error/20 flex items-center justify-center">
-            <AlertCircle className="w-6 h-6 text-error" />
-          </div>
-          <div>
-            <div className="text-xs font-bold text-white uppercase">MLP Stagnation</div>
-            <div className="text-[10px] text-on-surface-variant">L2 Cache Thrashing in Projection</div>
-          </div>
-        </div>
-        <p className="text-[10px] text-on-surface-variant leading-relaxed">
-          The MLP sub-block runtime is significantly degraded by L2 misses. Recommendation: Adjust tiling size for FFN expansion layers to improve spatial locality on H100 cores.
-        </p>
-        <button className="mt-4 w-full py-1.5 bg-surface-container-highest text-primary text-[10px] font-bold uppercase tracking-widest hover:bg-primary hover:text-on-primary transition-all">
-          Apply Re-Tiling
-        </button>
-      </div>
     </div>
   );
 }

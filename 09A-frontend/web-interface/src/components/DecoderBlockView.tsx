@@ -8,8 +8,11 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { motion } from 'motion/react';
+import { useAppState } from '@/src/controller/AppContext.tsx';
 
 export default function DecoderBlockView() {
+  const { state } = useAppState();
+  const { totalEnergy, memoryUsedGB, interBlockLatencyMs, parallelismFactor, ioWaitState } = state;
   const blocks = [
     { id: 'DB-001', runtime: '12.45ms', flops: '4.82', bytes: '1.2GB', cache: '412 MB', cachePercent: 40, intensity: '4.02 ops/B', hit: 92, share: '3.12%', status: 'ok' },
     { id: 'DB-002', runtime: '18.10ms', flops: '6.14', bytes: '2.4GB', cache: '850 MB', cachePercent: 75, intensity: '2.56 ops/B', hit: 88, share: '4.52%', status: 'ok' },
@@ -21,7 +24,7 @@ export default function DecoderBlockView() {
     <div className="p-8 space-y-8 animate-in fade-in duration-500">
       <div className="flex justify-between items-end mb-8">
         <div>
-          <h2 className="font-headline text-3xl font-light text-primary mb-1">Decoder Blocks Cluster</h2>
+          <h2 className="font-headline text-3xl font-light text-primary mb-1">Decoder Blocks</h2>
           <p className="text-on-surface-variant font-mono text-xs uppercase tracking-widest">
             Active Inference Cluster: <span className="text-secondary">#L-04-A-BLOCKS</span>
           </p>
@@ -29,11 +32,11 @@ export default function DecoderBlockView() {
         <div className="flex gap-4">
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-tertiary">
             <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Total Energy</div>
-            <div className="text-xl font-headline font-bold text-tertiary">14.2 kWh</div>
+            <div className="text-xl font-headline font-bold text-tertiary">{totalEnergy} kWh</div>
           </div>
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-secondary">
             <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Peak Memory</div>
-            <div className="text-xl font-headline font-bold text-secondary">82.4 GB</div>
+            <div className="text-xl font-headline font-bold text-secondary">{memoryUsedGB} GB</div>
           </div>
         </div>
       </div>
@@ -106,46 +109,28 @@ export default function DecoderBlockView() {
       </div>
 
       <div className="mt-8 grid grid-cols-3 gap-6">
-        <MetricCardSmall 
-          title="Inter-Block Latency" 
-          value="42" 
-          unit="ms" 
-          subtext="● DB-004 → DB-005 Path" 
-          icon={<ArrowRightLeft className="w-8 h-8" />} 
+        <MetricCardSmall
+          title="Inter-Block Latency"
+          value={String(interBlockLatencyMs)}
+          unit="ms"
+          subtext="● DB-004 → DB-005 Path"
+          icon={<ArrowRightLeft className="w-8 h-8" />}
         />
-        <MetricCardSmall 
-          title="Parallelism Factor" 
-          value="8x" 
-          subtext="Attention Head Pool" 
-          icon={<Zap className="w-8 h-8" />} 
+        <MetricCardSmall
+          title="Parallelism Factor"
+          value={`${parallelismFactor}x`}
+          subtext="Attention Head Pool"
+          icon={<Zap className="w-8 h-8" />}
         />
-        <MetricCardSmall 
-          title="IO Wait State" 
-          value="HIGH" 
-          subtext="Weight Offload Bottleneck" 
-          icon={<MemoryStick className="w-8 h-8" />} 
+        <MetricCardSmall
+          title="IO Wait State"
+          value={ioWaitState}
+          subtext="Weight Offload Bottleneck"
+          icon={<MemoryStick className="w-8 h-8" />}
           color="text-tertiary"
         />
       </div>
 
-      {/* Floating Alert */}
-      <div className="fixed bottom-8 right-8 z-50 bg-surface-variant/40 backdrop-blur-xl p-4 rounded-xl border border-outline-variant/20 shadow-2xl w-80">
-        <div className="flex items-center gap-3 mb-3">
-          <div className="w-10 h-10 rounded-full bg-error/20 flex items-center justify-center">
-            <AlertCircle className="w-6 h-6 text-error" />
-          </div>
-          <div>
-            <div className="text-xs font-bold text-white uppercase">Decoder Bottleneck</div>
-            <div className="text-[10px] text-on-surface-variant">Block DB-004 Intensity Drop</div>
-          </div>
-        </div>
-        <p className="text-[10px] text-on-surface-variant leading-relaxed">
-          Block DB-004 is exhibiting high IO wait times due to excessive weight offloading. Recommend increasing shard redundancy or re-evaluating the parallelism factor.
-        </p>
-        <button className="mt-4 w-full py-1.5 bg-surface-container-highest text-primary text-[10px] font-bold uppercase tracking-widest hover:bg-primary hover:text-on-primary transition-all">
-          Run Optimizer
-        </button>
-      </div>
     </div>
   );
 }

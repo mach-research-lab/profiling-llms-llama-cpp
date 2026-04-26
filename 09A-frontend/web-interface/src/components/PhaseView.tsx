@@ -7,8 +7,26 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { motion } from 'motion/react';
+import { useAppState } from '@/src/controller/AppContext.tsx';
+
+// TODO: Tokenization, Sampling eventuellt
+
+// TODO: Heatmap component that takes in a massive matrix
+  // TODO: (Tiles)
 
 export default function PhaseView() {
+  const { state } = useAppState();
+  const {
+    latencyMs, tokensPerSecond,
+    prefillTimeMs, prefillTimePercent, prefillFlopsTrillion, prefillFlopsTrendPct,
+    prefillIntensity, prefillBytesMovedGB, prefillIPC, prefillEnergyMJ,
+    prefillHitRate, prefillMatmulPct,
+    decodeTimeMs, decodeTimePercent, decodeFlopsTrillion, decodeFlopsTrendPct,
+    decodeIntensity, decodeBytesMovedGB, decodeIPC, decodeEnergyMJ,
+    decodeHitRate, decodeMatmulPct,
+  } = state;
+  const fmt = (pct: number) => `${pct >= 0 ? '↑' : '↓'} ${Math.abs(pct)}%`;
+
   return (
     <div className="p-8 space-y-8 animate-in fade-in duration-500">
       {/* Header Status */}
@@ -22,11 +40,11 @@ export default function PhaseView() {
         <div className="flex gap-4">
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-tertiary">
             <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Total Latency</div>
-            <div className="text-xl font-headline font-bold text-tertiary">142.4ms</div>
+            <div className="text-xl font-headline font-bold text-tertiary">{latencyMs}ms</div>
           </div>
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-secondary">
             <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Throughput</div>
-            <div className="text-xl font-headline font-bold text-secondary">84.2 tok/s</div>
+            <div className="text-xl font-headline font-bold text-secondary">{tokensPerSecond.toLocaleString()} tok/s</div>
           </div>
         </div>
       </div>
@@ -34,22 +52,22 @@ export default function PhaseView() {
       {/* Side-by-Side Comparison Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* PREFILL PHASE */}
-        <PhaseSection 
-          title="PHASE 01: PREFILL" 
+        <PhaseSection
+          title="PHASE 01: PREFILL"
           icon={<Zap className="w-5 h-5 text-primary fill-current" />}
           badge="COMPUTE BOUND"
           badgeColor="text-primary bg-primary/10 border-primary/30"
-          time="42.8ms"
-          timePercent={30}
-          flops="1.24 T"
-          flopsTrend="↑ 12%"
-          intensity="18.4 FLOPs/Byte"
+          time={`${prefillTimeMs}ms`}
+          timePercent={prefillTimePercent}
+          flops={`${prefillFlopsTrillion} T`}
+          flopsTrend={fmt(prefillFlopsTrendPct)}
+          intensity={`${prefillIntensity} FLOPs/Byte`}
           intensityPoint={{ x: 280, y: 80 }}
-          bytesMoved="68.2 GB"
-          ipc="3.82"
-          energy="42.4 mJ"
-          hitRate={94.2}
-          matmul={85}
+          bytesMoved={`${prefillBytesMovedGB} GB`}
+          ipc={String(prefillIPC)}
+          energy={`${prefillEnergyMJ} mJ`}
+          hitRate={prefillHitRate}
+          matmul={prefillMatmulPct}
           primaryColor="bg-primary"
         />
 
@@ -59,17 +77,17 @@ export default function PhaseView() {
           icon={<RefreshCw className="w-5 h-5 text-secondary" />}
           badge="MEMORY BOUND"
           badgeColor="text-secondary bg-secondary/10 border-secondary/30"
-          time="99.6ms"
-          timePercent={70}
-          flops="0.18 T"
-          flopsTrend="↓ 4%"
-          intensity="0.42 FLOPs/Byte"
+          time={`${decodeTimeMs}ms`}
+          timePercent={decodeTimePercent}
+          flops={`${decodeFlopsTrillion} T`}
+          flopsTrend={fmt(decodeFlopsTrendPct)}
+          intensity={`${decodeIntensity} FLOPs/Byte`}
           intensityPoint={{ x: 20, y: 144 }}
-          bytesMoved="428.1 GB"
-          ipc="0.64"
-          energy="182.8 mJ"
-          hitRate={41.8}
-          matmul={25}
+          bytesMoved={`${decodeBytesMovedGB} GB`}
+          ipc={String(decodeIPC)}
+          energy={`${decodeEnergyMJ} mJ`}
+          hitRate={decodeHitRate}
+          matmul={decodeMatmulPct}
           primaryColor="bg-secondary"
           isWarning
         />
@@ -100,24 +118,6 @@ export default function PhaseView() {
         </div>
       </div>
 
-      {/* Floating Alert */}
-      <div className="fixed bottom-8 right-8 z-50 bg-surface-variant/40 backdrop-blur-xl p-4 rounded-xl border border-outline-variant/20 shadow-2xl w-80">
-        <div className="flex items-center gap-3 mb-3">
-          <div className="w-10 h-10 rounded-full bg-tertiary/20 flex items-center justify-center">
-            <AlertCircle className="w-6 h-6 text-tertiary" />
-          </div>
-          <div>
-            <div className="text-xs font-bold text-white uppercase">Phase 2 Bottleneck</div>
-            <div className="text-[10px] text-on-surface-variant">HBM2e Bandwidth Saturation Detected</div>
-          </div>
-        </div>
-        <p className="text-[10px] text-on-surface-variant leading-relaxed">
-          The Decode phase is currently limited by weights-loading latency. Consider increasing KV-Cache quantization or reducing batch size to alleviate interconnect pressure.
-        </p>
-        <button className="mt-4 w-full py-1.5 bg-surface-container-highest text-primary text-[10px] font-bold uppercase tracking-widest hover:bg-primary hover:text-on-primary transition-all">
-          Run Optimizer
-        </button>
-      </div>
     </div>
   );
 }

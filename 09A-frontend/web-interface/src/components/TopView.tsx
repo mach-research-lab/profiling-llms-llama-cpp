@@ -1,26 +1,36 @@
 import React from 'react';
-import { 
-  Info, 
-  CheckCircle, 
-  Timer, 
-  Zap, 
-  Activity, 
-  Cpu, 
+import {
+  Info,
+  CheckCircle,
+  Timer,
+  Zap,
+  Activity,
+  Cpu,
   AlertTriangle,
   MemoryStick,
   ArrowUpRight
 } from 'lucide-react';
 import { motion } from 'motion/react';
+import { useAppState } from "@/src/controller/AppContext.tsx";
+
+
 
 export default function TopView() {
+  const { state }  = useAppState();
+  const {
+    modelName, totalRuntime, totalEnergy, tokensPerSecond, memoryUsedGB,
+    modelSizeGB, kvCacheGB, stabilityPercent, packetLossPercent,
+    inputTokensM, outputTokensM, powerWatts, cpuUtilPercent, cacheMissPercent,
+  } = state;
+
   return (
     <div className="p-8 space-y-8 animate-in fade-in duration-500">
       {/* Header Section */}
       <header className="flex justify-between items-end">
         <div>
-          <h1 className="font-headline text-3xl font-light text-primary mb-1">System Top View</h1>
+          <h1 className="font-headline text-3xl font-light text-primary mb-1">Top View</h1>
           <p className="text-on-surface-variant font-mono text-xs uppercase tracking-widest">
-            Real-time telemetry: <span className="text-secondary">GPT-Kinetic-4-v2.1</span>
+            Model Analytics Overview: <span className="text-secondary">{modelName}</span>
           </p>
         </div>
         <div className="flex gap-4">
@@ -56,22 +66,22 @@ export default function TopView() {
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
                 <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Model Size</div>
-                <div className="text-2xl font-headline font-bold text-white mt-1">175.4 <span className="text-xs text-on-surface-variant">GB</span></div>
+                <div className="text-2xl font-headline font-bold text-white mt-1">{modelSizeGB} <span className="text-xs text-on-surface-variant">GB</span></div>
               </div>
               <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
                 <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">KV-Cache</div>
-                <div className="text-2xl font-headline font-bold text-white mt-1">12.8 <span className="text-xs text-on-surface-variant">GB</span></div>
+                <div className="text-2xl font-headline font-bold text-white mt-1">{kvCacheGB} <span className="text-xs text-on-surface-variant">GB</span></div>
               </div>
             </div>
             <div className="mt-6">
               <div className="flex justify-between items-center text-[10px] text-on-surface-variant uppercase mb-2 font-bold">
                 <span>Stability</span>
-                <span className="text-secondary font-mono">99.2%</span>
+                <span className="text-secondary font-mono">{stabilityPercent}%</span>
               </div>
               <div className="h-1.5 bg-surface-container-lowest rounded-full overflow-hidden">
-                <motion.div 
+                <motion.div
                   initial={{ width: 0 }}
-                  animate={{ width: '99.2%' }}
+                  animate={{ width: `${stabilityPercent}%` }}
                   transition={{ duration: 1, ease: "easeOut" }}
                   className="h-full bg-secondary" 
                 />
@@ -88,7 +98,7 @@ export default function TopView() {
             <div className="space-y-4">
               <div className="flex justify-between items-center text-xs">
                 <span className="text-on-surface-variant">Packet Loss</span>
-                <span className="font-mono text-white">0.002%</span>
+                <span className="font-mono text-white">{packetLossPercent}%</span>
               </div>
               <div className="flex justify-between items-center text-xs">
                 <span className="text-on-surface-variant">Thermal Status</span>
@@ -103,53 +113,53 @@ export default function TopView() {
           {/* Row 1 */}
           <MetricCard 
             title="Total Runtime" 
-            value="142:32:05" 
+            value={totalRuntime}
             icon={<Timer className="w-8 h-8" />} 
           />
-          <MetricCard 
-            title="Avg Tokens/s" 
-            value="1,240" 
-            trend="↑ 4.2% Peak" 
-            icon={<Activity className="w-8 h-8" />} 
+          <MetricCard
+            title="Avg Tokens/s"
+            value={tokensPerSecond.toLocaleString()}
+            trend="↑ 4.2% Peak"
+            icon={<Activity className="w-8 h-8" />}
           />
           <MetricCard 
             title="Total Energy" 
-            value="4.2" 
+            value={totalEnergy}
             unit="kW/h" 
             icon={<Zap className="w-8 h-8" />} 
             color="text-tertiary"
           />
           
           {/* Row 2 */}
-          <MetricCard 
-            title="Peak RSS Mem" 
-            value="188.2" 
-            unit="GB" 
-            icon={<MemoryStick className="w-8 h-8" />} 
+          <MetricCard
+            title="Peak RSS Mem"
+            value={memoryUsedGB}
+            unit="GB"
+            icon={<MemoryStick className="w-8 h-8" />}
           />
-          <MetricCard 
-            title="Avg CPU Util" 
-            value="84.5" 
-            unit="%" 
-            progress={84.5}
-            icon={<Cpu className="w-8 h-8" />} 
+          <MetricCard
+            title="Avg CPU Util"
+            value={cpuUtilPercent}
+            unit="%"
+            progress={cpuUtilPercent}
+            icon={<Cpu className="w-8 h-8" />}
           />
-          <MetricCard 
-            title="Cache Misses" 
-            value="4.1" 
-            unit="%" 
-            icon={<AlertTriangle className="w-8 h-8 text-error" />} 
+          <MetricCard
+            title="Cache Misses"
+            value={cacheMissPercent}
+            unit="%"
+            icon={<AlertTriangle className="w-8 h-8 text-error" />}
             isWarning
           />
 
           {/* Row 3 */}
           <div className="bg-surface-container p-6 rounded-lg md:col-span-1 border-l-2 border-primary">
             <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Input Tokens</div>
-            <div className="text-2xl font-headline font-bold text-white mt-2">8.4 <span className="text-sm text-on-surface-variant">M</span></div>
+            <div className="text-2xl font-headline font-bold text-white mt-2">{inputTokensM} <span className="text-sm text-on-surface-variant">M</span></div>
           </div>
           <div className="bg-surface-container p-6 rounded-lg md:col-span-1 border-l-2 border-secondary">
             <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Output Tokens</div>
-            <div className="text-2xl font-headline font-bold text-white mt-2">12.9 <span className="text-sm text-on-surface-variant">M</span></div>
+            <div className="text-2xl font-headline font-bold text-white mt-2">{outputTokensM} <span className="text-sm text-on-surface-variant">M</span></div>
           </div>
           <div className="bg-surface-container p-6 rounded-lg md:col-span-1 border-l-2 border-tertiary">
             <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Power Ribbon</div>
@@ -158,7 +168,7 @@ export default function TopView() {
               <div className="w-1 h-6 bg-tertiary/40"></div>
               <div className="w-1 h-8 bg-tertiary/60"></div>
               <div className="w-1 h-4 bg-tertiary"></div>
-              <span className="text-xs font-mono text-tertiary ml-2">422W</span>
+              <span className="text-xs font-mono text-tertiary ml-2">{powerWatts}W</span>
             </div>
           </div>
         </div>

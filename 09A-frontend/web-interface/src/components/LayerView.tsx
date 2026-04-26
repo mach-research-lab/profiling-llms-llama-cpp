@@ -9,8 +9,12 @@ import {
   Zap
 } from 'lucide-react';
 import { motion } from 'motion/react';
+import { useAppState } from '@/src/controller/AppContext.tsx';
 
 export default function LayerView() {
+  const { state } = useAppState();
+  const { latencyMs, memoryUsedGB, memoryTotalGB, computeEfficiencyPercent } = state;
+
   return (
     <div className="p-8 space-y-8 animate-in fade-in duration-500">
       <div className="flex justify-between items-end mb-8">
@@ -23,11 +27,11 @@ export default function LayerView() {
         <div className="flex gap-4">
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-primary">
             <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Inference Latency</div>
-            <div className="text-xl font-headline font-bold text-primary">24.8ms</div>
+            <div className="text-xl font-headline font-bold text-primary">{latencyMs}ms</div>
           </div>
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-secondary">
             <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Compute Efficiency</div>
-            <div className="text-xl font-headline font-bold text-secondary">92.4%</div>
+            <div className="text-xl font-headline font-bold text-secondary">{computeEfficiencyPercent}%</div>
           </div>
         </div>
       </div>
@@ -225,7 +229,7 @@ export default function LayerView() {
         </div>
         <div className="flex items-center gap-4">
           <span className="text-primary">0% Error Rate</span>
-          <span>Mem: 42.1 / 80 GB</span>
+          <span>Mem: {memoryUsedGB} / {memoryTotalGB} GB</span>
         </div>
       </footer>
     </div>

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { View } from './types';
+import { AppProvider } from './controller/AppContext';
 import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
 import TopView from './components/TopView';
@@ -10,8 +11,9 @@ import LayerView from './components/LayerView';
 import ModelSelectionView from './components/ModelSelectionView';
 import PromptsView from './components/PromptsView';
 
+
 export default function App() {
-  const [currentView, setCurrentView] = useState<View>('top');
+  const [currentView, setCurrentView] = useState<View>('models');
 
   const renderView = () => {
     switch (currentView) {
@@ -26,27 +28,31 @@ export default function App() {
       case 'layer':
         return <LayerView />;
       case 'models':
-        return <ModelSelectionView />;
+        return <ModelSelectionView onViewChange={setCurrentView} />;
       case 'prompts':
         return <PromptsView />;
       default:
-        return <TopView />;
+        return <ModelSelectionView />;
     }
   };
+  const hideSidebar = currentView === 'prompts' || currentView === 'models';
+
 
   return (
-    <div className="min-h-screen bg-background text-on-surface selection:bg-primary/30 selection:text-primary">
-      {/* Background Pattern */}
-      <div className="fixed inset-0 data-grid-pattern opacity-20 pointer-events-none z-0"></div>
-      
-      <TopBar currentView={currentView} onViewChange={setCurrentView} />
-      <Sidebar currentView={currentView} onViewChange={setCurrentView} />
+      <AppProvider>
+        <div className="min-h-screen bg-background text-on-surface selection:bg-primary/30 selection:text-primary">
+          {/* Background Pattern */}
+          <div className="fixed inset-0 data-grid-pattern opacity-20 pointer-events-none z-0"></div>
 
-      <main className="pl-64 pt-16 min-h-screen relative z-10">
-        <div className="max-w-[1600px] mx-auto">
-          {renderView()}
+          <TopBar currentView={currentView} onViewChange={setCurrentView} />
+          {!hideSidebar && <Sidebar currentView={currentView} onViewChange={setCurrentView} />}
+
+          <main className="pl-64 pt-16 min-h-screen relative z-10">
+            <div className="max-w-[1600px] mx-auto">
+              {renderView()}
+            </div>
+          </main>
         </div>
-      </main>
-    </div>
+      </AppProvider>
   );
 }
