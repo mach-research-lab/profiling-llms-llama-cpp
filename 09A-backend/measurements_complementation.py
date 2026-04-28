@@ -113,8 +113,13 @@ def _add_db_metrics(phase: dict, phase_name: str, run_id: int, db_path: str):
     cyc_rows = get_papi_totals_by_operation(
         papi_event="PAPI_TOT_CYC", phase=phase_name, db_path=db_path
     )
+    llc_rows = get_papi_totals_by_operation(
+        papi_event="PAPI_L3_TCM", phase=phase_name, db_path=db_path
+    )
+
     ins_by_op = {r["event_operation_type"]: r["total_papi_value"] for r in ins_rows}
     cyc_by_op = {r["event_operation_type"]: r["total_papi_value"] for r in cyc_rows}
+    llcm_by_op = {r["event_operation_type"]: r["total_papi_value"] for r in llc_rows}
 
     # --- Arithmetic intensity per operation from DB ---
     ai_rows = get_arithmetic_intensity_per_operation(run_id=run_id, phase=phase_name, db_path=db_path)
@@ -133,6 +138,9 @@ def _add_db_metrics(phase: dict, phase_name: str, run_id: int, db_path: str):
                 phase["op_type_share"][op]["IPC"] = (
                     round(tot_ins / tot_cyc, 4) if tot_cyc > 0 else None
                 )
+                
+                llc_misses = llcm_by_op.get(op, 0)
+                phase["op_type_share"][op]["bytes_moved"] = llc_misses * 64  # 64 byte cache lines
                 
 
 
