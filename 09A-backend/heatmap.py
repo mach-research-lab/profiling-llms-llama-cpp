@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import numpy as np
 import os
 import re
 import sqlite3
@@ -552,11 +553,10 @@ def resolve_time_column(df: pd.DataFrame) -> str:
 
 
 def resolve_memory_column(df: pd.DataFrame) -> str:
-    for candidate in ("papi_l3_tcm", "papi_l2_tcm", "papi_l1_dcm"):
-        if candidate in df.columns:
-            return candidate
+    if "papi_l3_tcm" in df.columns:
+        return "papi_l3_tcm"
     raise ValueError(
-        "No cache-miss column found. Expected one of papi_l3_tcm, papi_l2_tcm or papi_l1_dcm."
+        "Memory pressure heatmap requires papi_l3_tcm. L2/L1 fallback is disabled."
     )
 
 
@@ -707,6 +707,7 @@ def plot_heatmap(
     title: str,
     xlabel: str,
     value_label: str,
+    display_mode: str = "default",
     annotate: bool = False,
 ) -> Path:
     if matrix.empty:
@@ -718,8 +719,30 @@ def plot_heatmap(
     fig_width = max(8, 1.1 * max(1, len(matrix.columns)))
     fig_height = max(8, 0.4 * max(1, len(matrix.index)))
 
+    display_matrix = matrix.astype(float).copy()
+    colorbar_label = value_label
+
+    if display_mode == "memory-enhanced":
+        positive_values = display_matrix.values[display_matrix.values > 0]
+        if positive_values.size > 0:
+            clip_max = float(np.percentile(positive_values, 99))
+            display_matrix = display_matrix.clip(upper=clip_max)
+        display_matrix = np.log1p(display_matrix)
+
+        # Normalize each op-type row to make cross-layer variation visible.
+        row_min = display_matrix.min(axis=1)
+        row_max = display_matrix.max(axis=1)
+        row_span = row_max - row_min
+        non_zero_span = row_span > 0
+        if non_zero_span.any():
+            display_matrix.loc[non_zero_span] = (
+                display_matrix.loc[non_zero_span].sub(row_min[non_zero_span], axis=0)
+                .div(row_span[non_zero_span], axis=0)
+            )
+        colorbar_label = "normalized log1p(papi_l3_tcm)"
+
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    image = ax.imshow(matrix.values, cmap="YlOrRd", aspect="auto")
+    image = ax.imshow(display_matrix.values, cmap="YlOrRd", aspect="auto")
 
     ax.set_title(title)
     ax.set_xlabel(xlabel)
@@ -757,7 +780,7 @@ def plot_heatmap(
                 )
 
     colorbar = fig.colorbar(image, ax=ax)
-    colorbar.set_label(value_label)
+    colorbar.set_label(colorbar_label)
 
     fig.tight_layout()
     fig.savefig(output, dpi=160, bbox_inches="tight")
@@ -796,6 +819,7 @@ def create_heatmap(
     title: str
     xlabel: str
     value_label: str
+    display_mode = "default"
 
     if kind in {"op-share", "operation-share", "share"} and phase_view_path is not None:
         matrix, value_label = build_operation_share_matrix_from_phase_json(
@@ -832,6 +856,8 @@ def create_heatmap(
             top_n=top_n,
             include_special_layers=include_special_layers,
         )
+        if kind in {"memory", "memory-pressure", "llc", "cache-misses"}:
+            display_mode = "memory-enhanced"
 
     if matrix_output_path is not None:
         matrix_output = Path(matrix_output_path)
@@ -844,6 +870,7 @@ def create_heatmap(
         title=title,
         xlabel=xlabel,
         value_label=value_label,
+        display_mode=display_mode,
         annotate=annotate,
     )
     return matrix, plot_path
