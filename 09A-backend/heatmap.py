@@ -6,13 +6,15 @@ Supported heatmaps:
     1. time
        Runtime heatmap
     2. memory
-       Memory pressure heatmap
+       Memory heatmap
     3. ipc
        IPC heatmap
     4. op-share
        Phase-compare runtime heatmap
     5. op-share-ipc
        Phase-compare IPC heatmap
+    6. op-share-memory
+       Phase-compare memory heatmap
 """
 
 from __future__ import annotations
@@ -37,9 +39,11 @@ try:
     import matplotlib
 
     matplotlib.use("Agg")
+    from matplotlib import colors
     import matplotlib.pyplot as plt
 except ImportError:  # pragma: no cover
     matplotlib = None
+    colors = None
     plt = None
 
 try:
@@ -294,6 +298,7 @@ def resolve_decoder_block_view_path(results_dir: str | os.PathLike[str]) -> Path
 def build_operation_share_matrix_from_phase_json(
     phase_view_path: str | os.PathLike[str],
     metric_name: str = "total_time_us",
+    metric_candidates: list[str] | None = None,
     phases: list[str] | None = None,
     top_n: int | None = 20,
 ) -> tuple[pd.DataFrame, str]:
@@ -302,6 +307,7 @@ def build_operation_share_matrix_from_phase_json(
         raise ValueError("phase-view.json must contain a JSON object.")
 
     selected_phases = phases if phases else ["prefill", "decode"]
+    candidate_names = metric_candidates if metric_candidates else [metric_name]
     records: list[dict[str, object]] = []
     for phase in selected_phases:
         phase_payload = raw.get(phase)
@@ -315,11 +321,20 @@ def build_operation_share_matrix_from_phase_json(
         for op_type, metrics in op_type_share.items():
             if not isinstance(metrics, dict):
                 continue
+            metric_value = None
+            for candidate_name in candidate_names:
+                if candidate_name in metrics and metrics[candidate_name] is not None:
+                    metric_value = metrics[candidate_name]
+                    break
+            if metric_value is None and metric_candidates is not None:
+                continue
+            if metric_value is None:
+                metric_value = 0
             records.append(
                 {
                     "phase": phase,
                     "op_type": op_type,
-                    metric_name: float(metrics.get(metric_name, 0)),
+                    metric_name: float(metric_value),
                 }
             )
 
@@ -339,12 +354,26 @@ def build_operation_share_matrix_from_phase_json(
         matrix["prefill"] = 0.0
     if "decode" not in matrix.columns:
         matrix["decode"] = 0.0
-    delta_column = "delta_ipc" if metric_name == "IPC" else "delta_time"
+    delta_column_by_metric = {
+        "IPC": "delta_ipc",
+        "bytes_moved": "delta_memory",
+        "total_bytes": "delta_memory",
+        "memory_bytes": "delta_memory",
+        "papi_l3_tcm": "delta_memory",
+    }
+    delta_column = delta_column_by_metric.get(metric_name, "delta_time")
     matrix[delta_column] = matrix["decode"] - matrix["prefill"]
     matrix = matrix[["prefill", "decode", delta_column]]
     matrix = select_top_matrix_rows(matrix, top_n)
     op_order = (matrix["prefill"] + matrix["decode"]).sort_values(ascending=False).index
-    value_label = "ipc" if metric_name == "IPC" else "time_us"
+    value_label_by_metric = {
+        "IPC": "ipc",
+        "bytes_moved": "bytes_moved",
+        "total_bytes": "total_bytes",
+        "memory_bytes": "memory_bytes",
+        "papi_l3_tcm": "papi_l3_tcm",
+    }
+    value_label = value_label_by_metric.get(metric_name, "time_us")
     return matrix.reindex(op_order), value_label
 
 
@@ -556,7 +585,7 @@ def resolve_memory_column(df: pd.DataFrame) -> str:
     if "papi_l3_tcm" in df.columns:
         return "papi_l3_tcm"
     raise ValueError(
-        "Memory pressure heatmap requires papi_l3_tcm. L2/L1 fallback is disabled."
+        "L3 cache miss heatmap requires papi_l3_tcm. L2/L1 fallback is disabled."
     )
 
 
@@ -613,21 +642,23 @@ def build_operation_share_matrix(
     df: pd.DataFrame,
     phases: list[str] | None = None,
     top_n: int | None = 20,
+    value_column: str | None = None,
+    delta_column: str = "delta_time",
 ) -> pd.DataFrame:
-    time_column = resolve_time_column(df)
+    metric_column = value_column if value_column is not None else resolve_time_column(df)
     selected_phases = phases if phases else ["prefill", "decode"]
     filtered = filter_phases(df, selected_phases)
     aggregated = (
-        filtered.groupby(["phase", "op_type"], as_index=False)[time_column]
+        filtered.groupby(["phase", "op_type"], as_index=False)[metric_column]
         .sum()
         .sort_values(["phase", "op_type"])
     )
-    aggregated = select_top_operations(aggregated, time_column, top_n=top_n)
+    aggregated = select_top_operations(aggregated, metric_column, top_n=top_n)
 
     matrix = aggregated.pivot_table(
         index="op_type",
         columns="phase",
-        values=time_column,
+        values=metric_column,
         aggfunc="sum",
         fill_value=0.0,
     )
@@ -644,9 +675,9 @@ def build_operation_share_matrix(
         matrix["decode"] = matrix[decode_col]
     else:
         matrix["decode"] = 0.0
-    matrix["delta_time"] = matrix["decode"] - matrix["prefill"]
+    matrix[delta_column] = matrix["decode"] - matrix["prefill"]
 
-    matrix = matrix[["prefill", "decode", "delta_time"]]
+    matrix = matrix[["prefill", "decode", delta_column]]
     op_order = (matrix["prefill"] + matrix["decode"]).sort_values(ascending=False).index
     return matrix.reindex(op_order)
 
@@ -679,7 +710,7 @@ def build_heatmap_matrix(
             top_n=top_n,
             include_special_layers=include_special_layers,
         )
-        return matrix, "Memory Pressure Heatmap", "Layer", value_column
+        return matrix, "Memory Heatmap", "Layer", value_column
 
     if kind == "ipc":
         ipc_df = compute_ipc(filtered)
@@ -696,8 +727,19 @@ def build_heatmap_matrix(
         time_column = resolve_time_column(filtered)
         return matrix, "Phase Time Comparison Heatmap", "Metric", time_column
 
+    if kind in {"op-share-memory", "memory-share"}:
+        value_column = resolve_memory_column(filtered)
+        matrix = build_operation_share_matrix(
+            filtered,
+            phases=phases,
+            top_n=top_n,
+            value_column=value_column,
+            delta_column="delta_memory",
+        )
+        return matrix, "Phase Memory Comparison Heatmap", "Metric", value_column
+
     raise ValueError(
-        "Unknown heatmap kind. Expected one of: time, memory, ipc, op-share."
+        "Unknown heatmap kind. Expected one of: time, memory, ipc, op-share, op-share-ipc, op-share-memory."
     )
 
 
@@ -721,28 +763,77 @@ def plot_heatmap(
 
     display_matrix = matrix.astype(float).copy()
     colorbar_label = value_label
+    color_norm = None
+    cmap = plt.get_cmap("YlOrRd").copy()
+    image_values = display_matrix.values
 
-    if display_mode == "memory-enhanced":
+    if display_mode in {"time-log", "time-symlog"}:
         positive_values = display_matrix.values[display_matrix.values > 0]
         if positive_values.size > 0:
-            clip_max = float(np.percentile(positive_values, 99))
-            display_matrix = display_matrix.clip(upper=clip_max)
-        display_matrix = np.log1p(display_matrix)
+            vmax = float(np.percentile(positive_values, 98))
+            if display_mode == "time-symlog":
+                max_abs = float(np.percentile(np.abs(display_matrix.values), 98))
+                if max_abs > 0:
+                    linear_width = max(1.0, float(np.percentile(positive_values, 10)))
+                    color_norm = colors.SymLogNorm(
+                        linthresh=linear_width,
+                        vmin=-max_abs,
+                        vmax=max_abs,
+                        clip=True,
+                    )
+                    cmap = plt.get_cmap("RdBu_r").copy()
+                    colorbar_label = f"sym-log {value_label} (clipped at p98)"
+            else:
+                vmin = float(np.min(positive_values))
+                if vmax <= vmin:
+                    vmax = float(np.max(positive_values))
+                if vmax > vmin:
+                    color_norm = colors.LogNorm(vmin=vmin, vmax=vmax, clip=True)
+                    image_values = np.ma.masked_less_equal(display_matrix.values, 0)
+                    cmap.set_bad("#fffde7")
+                    colorbar_label = f"log-scaled {value_label} (clipped at p98)"
 
-        # Normalize each op-type row to make cross-layer variation visible.
-        row_min = display_matrix.min(axis=1)
-        row_max = display_matrix.max(axis=1)
-        row_span = row_max - row_min
-        non_zero_span = row_span > 0
-        if non_zero_span.any():
-            display_matrix.loc[non_zero_span] = (
-                display_matrix.loc[non_zero_span].sub(row_min[non_zero_span], axis=0)
-                .div(row_span[non_zero_span], axis=0)
+    if display_mode in {"memory-log", "memory-symlog"}:
+        positive_values = display_matrix.values[display_matrix.values > 0]
+        if positive_values.size > 0:
+            vmax = float(np.percentile(positive_values, 98))
+            if vmax <= 0:
+                vmax = float(np.max(positive_values))
+            if display_mode == "memory-symlog":
+                max_abs = float(np.percentile(np.abs(display_matrix.values), 98))
+                if max_abs > 0:
+                    linear_width = max(1.0, float(np.percentile(positive_values, 10)))
+                    color_norm = colors.SymLogNorm(
+                        linthresh=linear_width,
+                        vmin=-max_abs,
+                        vmax=max_abs,
+                        clip=True,
+                    )
+                    cmap = plt.get_cmap("RdBu_r").copy()
+                    colorbar_label = f"sym-log {value_label} (clipped at p98)"
+            else:
+                vmin = float(np.min(positive_values))
+                if vmax <= vmin:
+                    vmax = float(np.max(positive_values))
+                if vmax > vmin:
+                    color_norm = colors.LogNorm(vmin=vmin, vmax=vmax, clip=True)
+                    image_values = np.ma.masked_less_equal(display_matrix.values, 0)
+                    cmap.set_bad("#fffde7")
+                    colorbar_label = f"log-scaled {value_label} (clipped at p98)"
+
+    if display_mode == "ipc-diverging":
+        max_abs = float(np.max(np.abs(display_matrix.values)))
+        if max_abs > 0:
+            color_norm = colors.TwoSlopeNorm(
+                vmin=-max_abs,
+                vcenter=0.0,
+                vmax=max_abs,
             )
-        colorbar_label = "normalized log1p(papi_l3_tcm)"
+            cmap = plt.get_cmap("RdBu_r").copy()
+            colorbar_label = f"{value_label} delta-centered at 0"
 
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    image = ax.imshow(display_matrix.values, cmap="YlOrRd", aspect="auto")
+    image = ax.imshow(image_values, cmap=cmap, norm=color_norm, aspect="auto")
 
     ax.set_title(title)
     ax.set_xlabel(xlabel)
@@ -763,7 +854,7 @@ def plot_heatmap(
                 value = matrix.loc[row_name, col_name]
                 if is_phase_compare:
                     lowered_col = str(col_name).strip().lower()
-                    if lowered_col in {"delta_time", "delta_ipc"}:
+                    if lowered_col in {"delta_time", "delta_ipc", "delta_memory"}:
                         label = f"{value:+.2f}" if "ipc" in lowered_col else f"{value:+.0f}"
                     else:
                         label = f"{value:.2f}" if "ipc" in lowered_col or value_label == "ipc" else f"{value:.0f}"
@@ -820,6 +911,7 @@ def create_heatmap(
     xlabel: str
     value_label: str
     display_mode = "default"
+    handled = False
 
     if kind in {"op-share", "operation-share", "share"} and phase_view_path is not None:
         matrix, value_label = build_operation_share_matrix_from_phase_json(
@@ -830,6 +922,8 @@ def create_heatmap(
         )
         title = "Phase Time Comparison Heatmap"
         xlabel = "Metric"
+        display_mode = "time-symlog"
+        handled = True
     elif kind in {"op-share-ipc", "ipc-share"} and phase_view_path is not None:
         matrix, value_label = build_operation_share_matrix_from_phase_json(
             phase_view_path,
@@ -839,11 +933,29 @@ def create_heatmap(
         )
         title = "Phase IPC Comparison Heatmap"
         xlabel = "Metric"
-    else:
+        display_mode = "ipc-diverging"
+        handled = True
+    elif kind in {"op-share-memory", "memory-share"} and phase_view_path is not None:
+        try:
+            matrix, value_label = build_operation_share_matrix_from_phase_json(
+                phase_view_path,
+                metric_name="memory_bytes",
+                metric_candidates=["bytes_moved", "total_bytes"],
+                phases=phases,
+                top_n=top_n,
+            )
+            title = "Phase Memory Comparison Heatmap"
+            xlabel = "Metric"
+            display_mode = "memory-symlog"
+            handled = True
+        except ValueError:
+            handled = False
+
+    if not handled:
         resolved_db_path = Path(db_path) if db_path is not None else None
         if resolved_db_path is None or not resolved_db_path.is_file():
             raise ValueError(
-                "tensor_op_view.db is required for runtime, memory pressure and IPC heatmaps."
+                "tensor_op_view.db is required for runtime, L3 cache miss and IPC heatmaps."
             )
 
         measurements = load_measurements_from_sqlite_db(resolved_db_path, sql=sql)
@@ -856,8 +968,14 @@ def create_heatmap(
             top_n=top_n,
             include_special_layers=include_special_layers,
         )
-        if kind in {"memory", "memory-pressure", "llc", "cache-misses"}:
-            display_mode = "memory-enhanced"
+        if kind == "time":
+            display_mode = "time-log"
+        elif kind in {"op-share", "operation-share", "share"}:
+            display_mode = "time-symlog"
+        elif kind in {"op-share-memory", "memory-share"}:
+            display_mode = "memory-symlog"
+        elif kind in {"memory", "memory-pressure", "llc", "cache-misses"}:
+            display_mode = "memory-log"
 
     if matrix_output_path is not None:
         matrix_output = Path(matrix_output_path)
@@ -894,8 +1012,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--kind",
         default="time",
-        choices=["time", "memory", "ipc", "op-share", "op-share-ipc"],
-        help="Which heatmap to build (op-share compares time, op-share-ipc compares IPC between prefill and decode)",
+        choices=["time", "memory", "ipc", "op-share", "op-share-ipc", "op-share-memory"],
+        help="Which heatmap to build (op-share compares time, op-share-ipc compares IPC, op-share-memory compares memory between prefill and decode)",
     )
     parser.add_argument(
         "--phase",
@@ -998,23 +1116,36 @@ def prompt_interactive_args() -> argparse.Namespace:
     print("Answer with numbers.")
     print()
 
-    kind_options = ["time", "memory", "ipc", "op-share", "op-share-ipc"]
-    kind_labels = {
-        "time": "Runtime heatmap",
-        "memory": "Memory pressure heatmap",
-        "ipc": "IPC heatmap",
-        "op-share": "Phase-compare runtime heatmap",
-        "op-share-ipc": "Phase-compare IPC heatmap",
-    }
-    kind_choice = _prompt_choice(
-        "Choose heatmap kind:",
-        options=[kind_labels[name] for name in kind_options],
+    view_options = ["regular", "phase"]
+    view_choice = _prompt_choice(
+        "Choose heatmap view:",
+        options=["Regular layer heatmap", "Phase comparison heatmap"],
         default_index=1,
     )
-    kind = kind_options[kind_choice - 1]
+    selected_view = view_options[view_choice - 1]
+
+    metric_options_by_view = {
+        "regular": [
+            ("time", "Runtime heatmap"),
+            ("memory", "Memory heatmap"),
+            ("ipc", "IPC heatmap"),
+        ],
+        "phase": [
+            ("op-share", "Phase runtime comparison heatmap"),
+            ("op-share-memory", "Phase memory comparison heatmap"),
+            ("op-share-ipc", "Phase IPC comparison heatmap"),
+        ],
+    }
+    metric_options = metric_options_by_view[selected_view]
+    metric_choice = _prompt_choice(
+        "Choose metric:",
+        options=[label for _, label in metric_options],
+        default_index=1,
+    )
+    kind = metric_options[metric_choice - 1][0]
 
     phases = None
-    if kind in {"op-share", "op-share-ipc"}:
+    if selected_view == "phase":
         phases = ["prefill", "decode"]
 
     return argparse.Namespace(
