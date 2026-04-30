@@ -290,11 +290,6 @@ def resolve_phase_view_path(results_dir: str | os.PathLike[str]) -> Path | None:
     return path if path.is_file() else None
 
 
-def resolve_decoder_block_view_path(results_dir: str | os.PathLike[str]) -> Path | None:
-    path = Path(results_dir) / "decoder-block-view.json"
-    return path if path.is_file() else None
-
-
 def build_operation_share_matrix_from_phase_json(
     phase_view_path: str | os.PathLike[str],
     metric_name: str = "total_time_us",
@@ -375,105 +370,6 @@ def build_operation_share_matrix_from_phase_json(
     }
     value_label = value_label_by_metric.get(metric_name, "time_us")
     return matrix.reindex(op_order), value_label
-
-
-def block_label(block: Mapping[str, object]) -> str:
-    block_type = str(block.get("block_type", "block")).strip().lower()
-    block_id = int(block.get("block_id", 0))
-    prefix = "P" if block_type.startswith("prefill") else "D" if block_type.startswith("decode") else "B"
-    return f"{prefix}{block_id:02d}"
-
-
-def extract_decoder_metric(subcomponent: Mapping[str, object], heatmap_kind: str) -> float | None:
-    kind = heatmap_kind.strip().lower()
-    if kind == "time":
-        if "runtime_us" in subcomponent:
-            return float(subcomponent["runtime_us"])
-        if "runtime_ms" in subcomponent:
-            return float(subcomponent["runtime_ms"]) * 1000.0
-        if "runtime_ns" in subcomponent:
-            return float(subcomponent["runtime_ns"]) / 1000.0
-        return None
-
-    if kind in {"memory", "memory-pressure", "llc", "cache-misses"}:
-        cache_behavior = subcomponent.get("cache_behavior", {})
-        papi = subcomponent.get("papi", {})
-        if isinstance(cache_behavior, dict):
-            for key in ("L3_misses", "L2_misses", "L1_misses"):
-                if key in cache_behavior:
-                    return float(cache_behavior[key])
-        if isinstance(papi, dict):
-            for key in ("PAPI_L3_TCM", "PAPI_L2_TCM", "PAPI_L1_DCM"):
-                if key in papi:
-                    return float(papi[key])
-        return None
-
-    if kind == "ipc":
-        if "IPC" in subcomponent:
-            return float(subcomponent["IPC"])
-        papi = subcomponent.get("papi", {})
-        if isinstance(papi, dict):
-            cycles = float(papi.get("PAPI_TOT_CYC", 0))
-            instructions = float(papi.get("PAPI_TOT_INS", 0))
-            if cycles != 0:
-                return instructions / cycles
-        return None
-
-    raise ValueError(f"Unsupported JSON decoder metric for heatmap kind: {heatmap_kind}")
-
-
-def build_decoder_block_matrix_from_json(
-    decoder_block_path: str | os.PathLike[str],
-    heatmap_kind: str,
-    phases: list[str] | None = None,
-    top_n: int | None = 20,
-) -> tuple[pd.DataFrame, str]:
-    raw = load_json_file(decoder_block_path)
-    if not isinstance(raw, list):
-        raise ValueError("decoder-block-view.json must contain a JSON array.")
-
-    selected_phases = {phase.strip().lower() for phase in phases} if phases else None
-    records: list[dict[str, object]] = []
-
-    for block in raw:
-        if not isinstance(block, dict):
-            continue
-        block_type = str(block.get("block_type", "")).strip().lower()
-        if selected_phases is not None and block_type not in selected_phases:
-            continue
-
-        subcomponents = block.get("subcomponents", {})
-        if not isinstance(subcomponents, dict) or not subcomponents:
-            subcomponents = {"block_total": block}
-
-        for name, subcomponent in subcomponents.items():
-            if not isinstance(subcomponent, dict):
-                continue
-            value = extract_decoder_metric(subcomponent, heatmap_kind)
-            if value is None:
-                continue
-            records.append(
-                {
-                    "component": str(name),
-                    "block": block_label(block),
-                    "value": value,
-                }
-            )
-
-    if not records:
-        raise ValueError("decoder-block-view.json does not contain the requested metric.")
-
-    frame = pd.DataFrame.from_records(records)
-    matrix = frame.pivot_table(
-        index="component",
-        columns="block",
-        values="value",
-        aggfunc="sum",
-        fill_value=0.0,
-    )
-    matrix = select_top_matrix_rows(matrix, top_n)
-    column_order = sorted(matrix.columns)
-    return matrix.reindex(columns=column_order), "ipc" if heatmap_kind == "ipc" else "time_us" if heatmap_kind == "time" else "papi_l3_tcm"
 
 
 def load_group_mapping(group_file: str | os.PathLike[str] | None) -> dict[str, str]:
@@ -904,7 +800,6 @@ def create_heatmap(
 
     kind = heatmap_kind.strip().lower()
     phase_view_path = resolve_phase_view_path(results_dir)
-    decoder_block_path = resolve_decoder_block_view_path(results_dir)
 
     matrix: pd.DataFrame
     title: str
@@ -914,27 +809,33 @@ def create_heatmap(
     handled = False
 
     if kind in {"op-share", "operation-share", "share"} and phase_view_path is not None:
-        matrix, value_label = build_operation_share_matrix_from_phase_json(
-            phase_view_path,
-            metric_name="total_time_us",
-            phases=phases,
-            top_n=top_n,
-        )
-        title = "Phase Time Comparison Heatmap"
-        xlabel = "Metric"
-        display_mode = "time-symlog"
-        handled = True
+        try:
+            matrix, value_label = build_operation_share_matrix_from_phase_json(
+                phase_view_path,
+                metric_name="total_time_us",
+                phases=phases,
+                top_n=top_n,
+            )
+            title = "Phase Time Comparison Heatmap"
+            xlabel = "Metric"
+            display_mode = "time-symlog"
+            handled = True
+        except ValueError:
+            handled = False
     elif kind in {"op-share-ipc", "ipc-share"} and phase_view_path is not None:
-        matrix, value_label = build_operation_share_matrix_from_phase_json(
-            phase_view_path,
-            metric_name="IPC",
-            phases=phases,
-            top_n=top_n,
-        )
-        title = "Phase IPC Comparison Heatmap"
-        xlabel = "Metric"
-        display_mode = "ipc-diverging"
-        handled = True
+        try:
+            matrix, value_label = build_operation_share_matrix_from_phase_json(
+                phase_view_path,
+                metric_name="IPC",
+                phases=phases,
+                top_n=top_n,
+            )
+            title = "Phase IPC Comparison Heatmap"
+            xlabel = "Metric"
+            display_mode = "ipc-diverging"
+            handled = True
+        except ValueError:
+            handled = False
     elif kind in {"op-share-memory", "memory-share"} and phase_view_path is not None:
         try:
             matrix, value_label = build_operation_share_matrix_from_phase_json(
@@ -1001,7 +902,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--results-dir",
         default=str(DEFAULT_JSON_DIR),
-        help="Directory containing phase-view.json, decoder-block-view.json and tensor_op_view.db",
+        help="Directory containing phase-view.json and tensor_op_view.db",
     )
     parser.add_argument(
         "--db-path",
