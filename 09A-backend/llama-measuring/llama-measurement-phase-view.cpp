@@ -252,6 +252,7 @@ int main(int argc, char ** argv) {
     metrics.decode       = { "decode",       0, std::vector<long long>(n_events, 0), std::vector<CoreStat>(n_logical, {0,0,0,0,0,0,0}), {} };
 
     std::vector<CoreStat> before(n_logical), after(n_logical);
+    std::vector<long long> papi_tmp(n_events, 0);
 
     /////////////////////////////////////////////////
 
@@ -337,11 +338,12 @@ int main(int argc, char ** argv) {
 
         //////// TOKENIZATION MEASUREMENTS ENDS HERE /////////////
 
-        PAPI_stop(papi_event_set, metrics.tokenization.papi_values.data());
+        PAPI_stop(papi_event_set, papi_tmp.data());
         metrics.tokenization.runtime_ns += now_ns() - t_start;
         for (int i = 0; i < N_DOMAINS; i++) metrics.tokenization.energy_accum[i] += energy_read(energy, i);
         for (int c = 0; c < n_logical; c++) after[c] = read_core_stat(c);
         accumulate_core_stats(metrics.tokenization.core_accum, before, after, n_logical);
+        for(int i = 0; i < n_events; i++) metrics.tokenization.papi_values[i] += papi_tmp[i];
         
 
         ///////////////////////////////////////////////////////////
@@ -363,11 +365,12 @@ int main(int argc, char ** argv) {
         }
 
         //////// PREFILL MEASUREMENTS ENDS HERE /////////////
-        PAPI_stop(papi_event_set, metrics.prefill.papi_values.data());
+        PAPI_stop(papi_event_set, papi_tmp.data());
         metrics.prefill.runtime_ns += now_ns() - prefill_start;
         for (int i = 0; i < N_DOMAINS; i++) metrics.prefill.energy_accum[i] += energy_read(energy, i);
         for (int c = 0; c < n_logical; c++) after[c] = read_core_stat(c);
         accumulate_core_stats(metrics.prefill.core_accum, before, after, n_logical);
+        for(int i = 0; i < n_events; i++) metrics.prefill.papi_values[i] += papi_tmp[i];
         ///////////////////////////////////////////////////////////
 
         custom_print(custom_args.disable_prints, false, "User input processed.\n");
@@ -392,18 +395,18 @@ int main(int argc, char ** argv) {
 
             llama_token new_token = common_sampler_sample(smpl, ctx, -1);
             common_sampler_accept(smpl, new_token, true);
-           
             std::string piece = common_token_to_piece(ctx, new_token);
 
-            if (llama_vocab_is_eog(vocab, new_token)) break; //Check if end of generation token
-
             //////// SAMPLING MEASUREMENTS ENDS HERE /////////////////////
-            PAPI_stop(papi_event_set, metrics.sampling.papi_values.data());
+            PAPI_stop(papi_event_set, papi_tmp.data());
             metrics.sampling.runtime_ns += now_ns() - sampling_start;
             for (int i = 0; i < N_DOMAINS; i++) metrics.sampling.energy_accum[i] += energy_read(energy, i);
             for (int c = 0; c < n_logical; c++) after[c] = read_core_stat(c);
             accumulate_core_stats(metrics.sampling.core_accum, before, after, n_logical);
+            for(int i = 0; i < n_events; i++) metrics.sampling.papi_values[i] += papi_tmp[i];
             /////////////////////////////////////////////////////////////
+
+            if (llama_vocab_is_eog(vocab, new_token)) break; //Check if end of generation token
 
             //Print generated piece
             custom_print(custom_args.disable_prints, true, "%s", piece.c_str());
@@ -432,11 +435,12 @@ int main(int argc, char ** argv) {
             }
 
             //////// DECODE MEASUREMENTS ENDS HERE /////////////////////
-            PAPI_stop(papi_event_set, metrics.decode.papi_values.data());
+            PAPI_stop(papi_event_set, papi_tmp.data());
             metrics.decode.runtime_ns += now_ns() - decode_start;
             for (int i = 0; i < N_DOMAINS; i++) metrics.decode.energy_accum[i] += energy_read(energy, i);
             for (int c = 0; c < n_logical; c++) after[c] = read_core_stat(c);
             accumulate_core_stats(metrics.decode.core_accum, before, after, n_logical);
+            for(int i = 0; i < n_events; i++) metrics.decode.papi_values[i] += papi_tmp[i];
             /////////////////////////////////////////////////////////////
             
             n_pos++;

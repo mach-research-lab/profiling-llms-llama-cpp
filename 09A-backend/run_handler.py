@@ -188,15 +188,15 @@ def run_view(config: Config, clean_folder: bool, type: Run_type, gather_prompts,
 #Runs every view with conversation mode, is multibatch
 def run_every_view(config: Config, event_per_tensor: int | None):
 
-    #TOP VIEW START
-    print("\n" + "="*5 + " Starting top view " + "="*5 + "\n")
-    config.binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-top-view")
-    run_view(config, True, Run_type.TOP_VIEW, True)
-
     #PHASE VIEW START
     print("\n" + "="*5 + " Starting phase view " + "="*5 + "\n")
     config.binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-phase-view")
-    run_view(config, False, Run_type.PHASE_VIEW, False)
+    run_view(config, True, Run_type.PHASE_VIEW, True)
+
+    #TOP VIEW START
+    print("\n" + "="*5 + " Starting top view " + "="*5 + "\n")
+    config.binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-top-view")
+    run_view(config, False, Run_type.TOP_VIEW, False)
 
     #DECODER-BLOCKS VIEW START
     print("\n" + "="*5 + " Starting decoder block view " + "="*5 + "\n")
@@ -209,11 +209,12 @@ def run_every_view(config: Config, event_per_tensor: int | None):
     run_view(config, False, Run_type.TENSOR_OP_VIEW, False, event_per_tensor)
 
     #Complement JSON:s with additional fields
-    complement_phase_json(os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path),
-                          os.path.join(OUTPUT_PATH, Run_type.TENSOR_OP_VIEW.path),
-                          None, os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path))
-    
-    complement_decoder_block_json(os.path.join(OUTPUT_PATH, Run_type.DECODER_BLOCK_VIEW.path),
+    if config.custom_events is not None:
+        complement_phase_json(os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path),
+                              os.path.join(OUTPUT_PATH, Run_type.TENSOR_OP_VIEW.path),
+                              None, os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path))
+
+        complement_decoder_block_json(os.path.join(OUTPUT_PATH, Run_type.DECODER_BLOCK_VIEW.path),
                                   os.path.join(OUTPUT_PATH, Run_type.TENSOR_OP_VIEW.path),
                                   None,
                                   os.path.join(OUTPUT_PATH, Run_type.DECODER_BLOCK_VIEW.path))
