@@ -11,11 +11,14 @@ from enum import Enum
 # Homemade module
 from event_retriever import  get_valid_runs_from_list
 from measurements_complementation import complement_phase_json, complement_decoder_block_json
+from generate_csv import generate_csvs
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 LLAMA_ROOT  = os.path.dirname(SCRIPT_DIR)
 MODELS_ROOT = os.path.join(os.path.expanduser("~"), "shared/models")
 OUTPUT_PATH = os.path.join(LLAMA_ROOT, "run_every_view_results")
+
+TESTING = True
 
 #Data class holding arguments
 @dataclass
@@ -188,10 +191,25 @@ def run_view(config: Config, clean_folder: bool, type: Run_type, gather_prompts,
 #Runs every view with conversation mode, is multibatch
 def run_every_view(config: Config, event_per_tensor: int | None):
 
+    
+    #USED FOR TESTING 
+    if TESTING:
+        temp_dir = os.path.join(OUTPUT_PATH)
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        os.makedirs(temp_dir)
+
+        # Write prompts file upfront so no interactive input is needed
+        prompts_path = os.path.join(OUTPUT_PATH, "collected_prompts.json")
+        os.makedirs(OUTPUT_PATH, exist_ok=True)
+        with open(prompts_path, "w") as f:
+            json.dump({"prompts": [config.prompt, "quit"]}, f)
+    
+
     #PHASE VIEW START
     print("\n" + "="*5 + " Starting phase view " + "="*5 + "\n")
     config.binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-phase-view")
-    run_view(config, True, Run_type.PHASE_VIEW, True)
+    run_view(config, False, Run_type.PHASE_VIEW, False)
 
     #TOP VIEW START
     print("\n" + "="*5 + " Starting top view " + "="*5 + "\n")
@@ -209,7 +227,7 @@ def run_every_view(config: Config, event_per_tensor: int | None):
     run_view(config, False, Run_type.TENSOR_OP_VIEW, False, event_per_tensor)
 
     #Complement JSON:s with additional fields
-    if config.custom_events is not None:
+    if config.custom_events is None:
         complement_phase_json(os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path),
                               os.path.join(OUTPUT_PATH, Run_type.TENSOR_OP_VIEW.path),
                               None, os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path))
@@ -218,6 +236,10 @@ def run_every_view(config: Config, event_per_tensor: int | None):
                                   os.path.join(OUTPUT_PATH, Run_type.TENSOR_OP_VIEW.path),
                                   None,
                                   os.path.join(OUTPUT_PATH, Run_type.DECODER_BLOCK_VIEW.path))
+    
+    if TESTING:
+        print("\n" + "="*5 + " Generating CSV summary " + "="*5)
+        generate_csvs(OUTPUT_PATH)
     
 
 """
@@ -235,3 +257,37 @@ cfg_test = Config(
 run_every_view(cfg_test)
 
 """
+
+def test_run_with_all_models(event_per_tensor: int | None = None):
+    global OUTPUT_PATH
+
+    model_paths = [
+        os.path.join(MODELS_ROOT, "Llama3.2/Llama-3.2-1B-Instruct-Q4_K_M.gguf"),
+        os.path.join(MODELS_ROOT, "Llama3.2/Llama-3.2-1B-Instruct-Q8_0.gguf"),
+        os.path.join(MODELS_ROOT, "Llama3.2/Llama-3.2-1B-Instruct-f16.gguf"),
+        os.path.join(MODELS_ROOT, "qwen2.5/qwen2.5-1.5b-instruct-q4_0.gguf"),
+        os.path.join(MODELS_ROOT, "qwen2.5/qwen2.5-1.5b-instruct-q8_0.gguf"),
+        os.path.join(MODELS_ROOT, "qwen2.5/qwen2.5-1.5b-instruct-fp16.gguf"),
+    ]
+
+    for model_path in model_paths:
+        # Use the model filename (without extension) as the folder name
+        model_name = os.path.splitext(os.path.basename(model_path))[0]
+        OUTPUT_PATH = os.path.join(LLAMA_ROOT, "run_every_view_results", model_name)
+
+        print(f"\n\n{'='*10} Running model: {model_name} {'='*10}\n")
+
+        cfg = Config(
+            model_path=model_path,
+            custom_events=["PAPI_L3_TCM"],
+            prompt="Tell me a story that is a 1000 words long!",
+            n_predict=64,
+            k_cache_type="f16",
+            v_cache_type="f16",
+            binary_path="",
+        )
+
+        run_every_view(cfg, event_per_tensor)
+
+    # Reset OUTPUT_PATH back to default
+    OUTPUT_PATH = os.path.join(LLAMA_ROOT, "run_every_view_results")
