@@ -7,6 +7,7 @@
 #Ignore SQLite database files
 *.db
 
+roofline_results/*
 run_all_results*/
 #Ignore build artifacts
 build*/
