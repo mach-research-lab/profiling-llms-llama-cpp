@@ -493,13 +493,9 @@ def main():
     if not prompt:
         prompt = "What is the capital of Sweden?"
 
-    print("Tokenlimit per response? (default: unlimited)")
+    print("Token limit per response? (default: 10000)")
     raw = input("> ").strip()
-    n_predict = int(raw) if raw.isdigit() else sys.maxsize #A very large number to effectively mean "unlimited" without causing overflow issues in the C++ code.
-
-    
-    
-
+    n_predict = int(raw) if raw.isdigit() else 10000 
 
     configuration = Config(
         model_path,
