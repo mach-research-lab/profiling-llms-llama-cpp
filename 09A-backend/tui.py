@@ -493,13 +493,9 @@ def main():
     if not prompt:
         prompt = "What is the capital of Sweden?"
 
-    print("How many tokens to generate per response? (default: 64)")
+    print("Token limit per response? (default: 10000)")
     raw = input("> ").strip()
-    n_predict = int(raw) if raw.isdigit() else 64
-
-    
-    
-
+    n_predict = int(raw) if raw.isdigit() else 10000 
 
     configuration = Config(
         model_path,
