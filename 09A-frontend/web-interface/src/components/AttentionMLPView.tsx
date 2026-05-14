@@ -9,18 +9,24 @@ import {
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useAppState } from '@/src/controller/AppContext.tsx';
+import { fmt, fmtSI } from '@/src/controller/Controller.tsx';
 
 export default function AttentionMLPView() {
   const { state } = useAppState();
   const {
-    memoryUsedGB, blockLatencyMs,
-    attentionRuntimeMs, attentionRuntimePct, attentionFlopsTrillion, attentionFlopsTrendPct,
+    memoryUsedBytes, blockLatencyS, selectedBlockLabel,
+    attentionRuntimeS, attentionRuntimePct, attentionFLOPs, attentionFlopsTrendPct,
     attentionIntensity, attentionBytesMoved, attentionHitRate, attentionEnergyScore,
     attentionL1, attentionL2,
-    mlpRuntimeMs, mlpRuntimePct, mlpFlopsTrillion, mlpFlopsTrendPct,
+    attentionIPC, attentionFLOPsPerS, attentionL1Misses, attentionL2Misses, attentionL3Misses, attentionL3Accesses,
+    mlpRuntimeS, mlpRuntimePct, mlpFLOPs, mlpFlopsTrendPct,
     mlpIntensity, mlpBytesMoved, mlpHitRate, mlpEnergyScore, mlpL1, mlpL2,
+    mlpIPC, mlpFLOPsPerS, mlpL1Misses, mlpL2Misses, mlpL3Misses, mlpL3Accesses,
+    decimalPrecision,
   } = state;
-  const fmt = (pct: number) => `${pct >= 0 ? '↑' : '↓'} ${Math.abs(pct)}%`;
+  const f = (n: number) => fmt(n, decimalPrecision);
+  const si = (n: number, unit: string) => fmtSI(n, unit, decimalPrecision);
+  const trend = (pct: number) => `${pct >= 0 ? '↑' : '↓'} ${Math.abs(pct)}%`;
 
   return (
     <div className="p-8 space-y-8 animate-in fade-in duration-500">
@@ -28,17 +34,17 @@ export default function AttentionMLPView() {
         <div>
           <h2 className="font-headline text-3xl font-light text-primary mb-1">Attention & MLP Analytics</h2>
           <p className="text-on-surface-variant font-mono text-xs uppercase tracking-widest">
-            Decoder Block: <span className="text-secondary">#042-STABLE-KERNEL</span>
+            Decoder Block: <span className="text-secondary">{selectedBlockLabel || 'Average — All Decode Blocks'}</span>
           </p>
         </div>
         <div className="flex gap-4">
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-primary">
             <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Block Latency</div>
-            <div className="text-xl font-headline font-bold text-primary">{blockLatencyMs}ms</div>
+            <div className="text-xl font-headline font-bold text-primary">{si(blockLatencyS, 's')}</div>
           </div>
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-secondary">
-            <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">VRAM Context</div>
-            <div className="text-xl font-headline font-bold text-secondary">{memoryUsedGB} GB</div>
+            <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Peak RSS</div>
+            <div className="text-xl font-headline font-bold text-secondary">{si(memoryUsedBytes, 'B')}</div>
           </div>
         </div>
       </div>
@@ -50,18 +56,25 @@ export default function AttentionMLPView() {
           icon={<Brain className="w-5 h-5 text-primary fill-current" />}
           badge="OPTIMIZED"
           badgeColor="text-primary bg-primary/10 border-primary/30"
-          runtime={`${attentionRuntimeMs}ms`}
+          runtime={si(attentionRuntimeS, 's')}
           runtimePercent={attentionRuntimePct}
-          flops={`${attentionFlopsTrillion} T`}
-          flopsTrend={fmt(attentionFlopsTrendPct)}
-          intensity={`${attentionIntensity} FLOPs/Byte`}
+          flops={si(attentionFLOPs, 'FLOPs')}
+          flopsTrend={trend(attentionFlopsTrendPct)}
+          intensity={`${f(attentionIntensity)} FLOPs/Byte`}
           intensityPoint={{ x: 240, y: 80 }}
-          bytesMoved={attentionBytesMoved}
+          bytesMoved={si(attentionBytesMoved, 'B')}
           hitRate={attentionHitRate}
-          energy={`${attentionEnergyScore}/10`}
+          energy={`${f(attentionEnergyScore)}/10`}
           l1={attentionL1}
           l2={attentionL2}
+          ipc={attentionIPC}
+          flopsPerS={si(attentionFLOPsPerS, 'FLOPs/s')}
+          l1Misses={attentionL1Misses}
+          l2Misses={attentionL2Misses}
+          l3Misses={attentionL3Misses}
+          l3Accesses={attentionL3Accesses}
           primaryColor="bg-primary"
+          decimalPrecision={decimalPrecision}
         />
 
         {/* MLP MODULE */}
@@ -70,19 +83,26 @@ export default function AttentionMLPView() {
           icon={<Cpu className="w-5 h-5 text-tertiary" />}
           badge="BOTTLENECK"
           badgeColor="text-tertiary bg-tertiary/10 border-tertiary/30"
-          runtime={`${mlpRuntimeMs}ms`}
+          runtime={si(mlpRuntimeS, 's')}
           runtimePercent={mlpRuntimePct}
-          flops={`${mlpFlopsTrillion} T`}
-          flopsTrend={fmt(mlpFlopsTrendPct)}
-          intensity={`${mlpIntensity} FLOPs/Byte`}
+          flops={si(mlpFLOPs, 'FLOPs')}
+          flopsTrend={trend(mlpFlopsTrendPct)}
+          intensity={`${f(mlpIntensity)} FLOPs/Byte`}
           intensityPoint={{ x: 320, y: 80 }}
-          bytesMoved={mlpBytesMoved}
+          bytesMoved={si(mlpBytesMoved, 'B')}
           hitRate={mlpHitRate}
-          energy={`${mlpEnergyScore}/10`}
+          energy={`${f(mlpEnergyScore)}/10`}
           l1={mlpL1}
           l2={mlpL2}
+          ipc={mlpIPC}
+          flopsPerS={si(mlpFLOPsPerS, 'FLOPs/s')}
+          l1Misses={mlpL1Misses}
+          l2Misses={mlpL2Misses}
+          l3Misses={mlpL3Misses}
+          l3Accesses={mlpL3Accesses}
           primaryColor="bg-tertiary"
           isWarning
+          decimalPrecision={decimalPrecision}
         />
       </div>
 
@@ -114,10 +134,15 @@ export default function AttentionMLPView() {
   );
 }
 
-function SubBlockSection({ 
-  title, icon, badge, badgeColor, runtime, runtimePercent, flops, flopsTrend, 
-  intensity, intensityPoint, bytesMoved, hitRate, energy, l1, l2, primaryColor, isWarning 
+function SubBlockSection({
+  title, icon, badge, badgeColor, runtime, runtimePercent, flops, flopsTrend,
+  intensity, intensityPoint, bytesMoved, hitRate, energy, l1, l2,
+  ipc, flopsPerS, l1Misses, l2Misses, l3Misses, l3Accesses,
+  primaryColor, isWarning, decimalPrecision
 }: any) {
+  const f = (n: number) => fmt(n, decimalPrecision);
+  const l3HitPct  = l3Accesses > 0 ? ((l3Accesses - l3Misses) / l3Accesses) * 100 : 0;
+  const l3MissPct = l3Accesses > 0 ? (l3Misses / l3Accesses) * 100 : 0;
   return (
     <section className="space-y-6">
       <div className="flex items-center gap-2 border-b border-outline-variant/20 pb-2">
@@ -141,7 +166,7 @@ function SubBlockSection({
               className={`h-full ${primaryColor}`} 
             />
           </div>
-          <div className={`text-[10px] mt-1 font-bold ${primaryColor.replace('bg-', 'text-')}`}>{runtimePercent}% of block runtime</div>
+          <div className={`text-[10px] mt-1 font-bold ${primaryColor.replace('bg-', 'text-')}`}>{f(runtimePercent)}% of block runtime</div>
         </div>
         
         <div className="bg-surface-container p-4 rounded-lg relative overflow-hidden group">
@@ -188,12 +213,69 @@ function SubBlockSection({
           <div className="text-lg font-headline font-bold">{bytesMoved}</div>
         </div>
         <div className="bg-surface-container-low p-4 border border-outline-variant/10">
-          <div className="text-[10px] text-on-surface-variant mb-2 font-bold uppercase">L1 Hit Rate</div>
-          <div className={`text-lg font-headline font-bold ${hitRate > 80 ? 'text-secondary' : 'text-error'}`}>{hitRate}%</div>
+          <div className="text-[10px] text-on-surface-variant mb-2 font-bold uppercase">L3 Hit Rate</div>
+          <div className={`text-lg font-headline font-bold ${hitRate > 80 ? 'text-secondary' : 'text-error'}`}>{f(hitRate)}%</div>
         </div>
         <div className="bg-surface-container-low p-4 border border-outline-variant/10">
           <div className="text-[10px] text-on-surface-variant mb-2 font-bold uppercase">Energy Efficiency</div>
           <div className="text-lg font-headline font-bold text-tertiary">{energy}</div>
+        </div>
+      </div>
+
+      {/* IPC + Throughput */}
+      <div className="grid grid-cols-2 gap-4">
+        <div className="bg-surface-container p-4 rounded-lg">
+          <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold mb-1">IPC</div>
+          <div className={`text-3xl font-headline font-bold ${ipc >= 2 ? 'text-secondary' : ipc >= 1 ? 'text-primary' : 'text-error'}`}>
+            {f(ipc)}
+          </div>
+          <div className="text-[10px] text-on-surface-variant mt-1">Instructions / Cycle</div>
+          <div className="w-full bg-surface-container-highest h-1 mt-2 rounded-full overflow-hidden">
+            <motion.div
+              initial={{ width: 0 }}
+              animate={{ width: `${Math.min(ipc / 4 * 100, 100)}%` }}
+              transition={{ duration: 1 }}
+              className={`h-full ${primaryColor}`}
+            />
+          </div>
+          <div className="text-[10px] text-outline mt-1 font-mono">peak ≈ 4.0</div>
+        </div>
+        <div className="bg-surface-container p-4 rounded-lg">
+          <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold mb-1">Throughput</div>
+          <div className="text-3xl font-headline font-bold text-white">{flopsPerS}</div>
+          <div className="text-[10px] text-on-surface-variant mt-1">Achieved compute rate</div>
+        </div>
+      </div>
+
+      {/* Cache miss waterfall */}
+      <div className="bg-surface-container p-4 rounded-lg">
+        <h4 className="text-[10px] font-bold text-on-surface-variant uppercase mb-4">Cache Miss Waterfall</h4>
+        <div className="space-y-3">
+          {[
+            { label: 'L1', misses: l1Misses, total: l1Misses + (l2Misses ?? 0) + (l3Misses ?? 0), color: primaryColor },
+            { label: 'L2', misses: l2Misses, total: l1Misses + (l2Misses ?? 0) + (l3Misses ?? 0), color: primaryColor },
+            { label: 'L3', misses: l3Misses, total: l3Accesses,                                    color: 'bg-error'   },
+          ].map(({ label, misses, total, color }) => {
+            const pct = total > 0 ? Math.min((misses / total) * 100, 100) : 0;
+            return (
+              <div key={label} className="flex items-center gap-4">
+                <div className="w-6 text-[10px] text-on-surface-variant font-bold">{label}</div>
+                <div className="flex-1 h-2 bg-surface-container-highest rounded-full overflow-hidden">
+                  <motion.div
+                    initial={{ width: 0 }}
+                    animate={{ width: `${pct}%` }}
+                    transition={{ duration: 0.8 }}
+                    className={`h-full ${color}`}
+                  />
+                </div>
+                <div className="text-[10px] font-mono font-bold w-20 text-right">{misses?.toLocaleString()}</div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex justify-between mt-3 text-[8px] text-outline font-mono">
+          <span>L3 hit rate: {f(l3HitPct)}%</span>
+          <span>L3 miss rate: {f(l3MissPct)}%</span>
         </div>
       </div>
 
@@ -205,14 +287,14 @@ function SubBlockSection({
             <div className="flex-1 h-2 bg-surface-container-highest rounded-full overflow-hidden">
               <div className={`h-full ${primaryColor}`} style={{ width: `${l1}%` }}></div>
             </div>
-            <div className="text-[10px] font-mono font-bold">{l1}%</div>
+            <div className="text-[10px] font-mono font-bold">{f(l1)}%</div>
           </div>
           <div className="flex items-center gap-4">
             <div className="w-8 text-[10px] text-on-surface-variant font-bold">L2</div>
             <div className="flex-1 h-2 bg-surface-container-highest rounded-full overflow-hidden">
               <div className={`h-full ${primaryColor}`} style={{ width: `${l2}%` }}></div>
             </div>
-            <div className="text-[10px] font-mono font-bold">{l2}%</div>
+            <div className="text-[10px] font-mono font-bold">{f(l2)}%</div>
           </div>
         </div>
       </div>

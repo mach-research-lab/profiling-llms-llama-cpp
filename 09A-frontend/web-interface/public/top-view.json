@@ -1,0 +1,22 @@
+{
+  "PAPI_L1_TCM": 46931990,
+  "PAPI_L2_TCM": 33452292,
+  "PAPI_L3_TCM": 24605228,
+  "avg_cpu_usage": 49.628581961336536,
+  "energy-cores": 11058227.5390625,
+  "energy-pkg": 11875427.24609375,
+  "energy-psys": 16015502.9296875,
+  "generated_tokens": 9,
+  "kv_size_capacity_bytes": 4294967296,
+  "kv_size_estimated_bytes": 655360,
+  "kv_size_used_bytes": 656000,
+  "kv_tokens_capacity": 131072,
+  "kv_tokens_used": 20,
+  "model_size_bytes": 799862912,
+  "model_size_mb": 762.8087158203125,
+  "peak_rss_mb": 5910.7890625,
+  "runtime_ns": 264464538,
+  "runtime_s": 0.264464538,
+  "token_throughput": 34.03102763063076,
+  "total_tokens": 20
+}

@@ -1,27 +1,29 @@
-import React from 'react';
-import {
-  Info,
-  CheckCircle,
-  Timer,
-  Zap,
-  Activity,
-  Cpu,
-  AlertTriangle,
-  MemoryStick,
-  ArrowUpRight
-} from 'lucide-react';
+import React, {useEffect} from 'react';
+import {Info, Timer, Zap, Activity} from 'lucide-react';
 import { motion } from 'motion/react';
 import { useAppState } from "@/src/controller/AppContext.tsx";
-
+import { fetchAndSetModels, fetchAndSetResults, fmt, fmtSI } from "@/src/controller/Controller.tsx";
 
 
 export default function TopView() {
-  const { state }  = useAppState();
+  const { state, set } = useAppState();
   const {
-    modelName, totalRuntime, totalEnergy, tokensPerSecond, memoryUsedGB,
-    modelSizeGB, kvCacheGB, stabilityPercent, packetLossPercent,
-    inputTokensM, outputTokensM, powerWatts, cpuUtilPercent, cacheMissPercent,
+    modelName, totalRuntimeS, tokensPerSecond, memoryUsedBytes, maxTokens, papiEventsPerRun,
+    arithmeticIntensity, achievedFLOPS, peakFLOPS, memBwBs, ridgePoint,
+    totalFLOPs, dramBytes, hwCpuModel, hwCores, hwBaseGHz, hwBoostGHz, hwAvgGHz, hwISA, hwFlopsPerCycle,
+    modelSizeBytes, kvCapacityBytes, kvUsedBytes, kvTokensCapacity, kvTokensUsed, kvUtilPercent,
+    inputTokens, outputTokens, cpuUtilPercent,
+    papiL1Misses, papiL2Misses, papiL3Misses,
+    energyPsysJ, energyPkgJ, energyCoresJ,
+    decimalPrecision,
   } = state;
+
+  const f = (n: number) => fmt(n, decimalPrecision);
+  const si = (n: number, unit: string) => fmtSI(n, unit, decimalPrecision);
+
+  useEffect(() => {
+    fetchAndSetResults(set);
+  }, []);
 
   return (
     <div className="p-8 space-y-8 animate-in fade-in duration-500">
@@ -35,181 +37,236 @@ export default function TopView() {
         </div>
         <div className="flex gap-4">
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-primary">
-            <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Instance ID</div>
-            <div className="text-xl font-headline font-bold text-primary">NODE-772-ALPH</div>
+            <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Max Tokens</div>
+            <div className="text-xl font-headline font-bold text-primary">{maxTokens}</div>
           </div>
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-secondary">
-            <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Status</div>
-            <div className="flex items-center gap-2 text-xl font-headline font-bold text-secondary">
-              <span className="w-2 h-2 bg-secondary rounded-full animate-pulse"></span>
-              SYNCHRONIZED
-            </div>
+            <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">PAPI Events / Run</div>
+            <div className="text-xl font-headline font-bold text-secondary">{papiEventsPerRun}</div>
           </div>
         </div>
       </header>
 
-      {/* Primary Architecture & Metrics Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left: Architecture Summary */}
-        <div className="lg:col-span-4 space-y-6">
-          <section className="bg-surface-container p-6 rounded-lg border border-outline-variant/10 relative overflow-hidden group">
-            <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-              <Zap className="w-16 h-16 text-primary" />
-            </div>
-            <h2 className="font-headline text-xl font-bold text-white mb-4 flex items-center gap-2">
-              <Info className="w-5 h-5 text-primary" />
-              Model Summary
-            </h2>
-            <p className="text-sm text-on-surface-variant leading-relaxed mb-6">
-              Transformer-based architecture optimized for low-latency active inference. FP16 precision kernels with quantization-aware paths.
-            </p>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
-                <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Model Size</div>
-                <div className="text-2xl font-headline font-bold text-white mt-1">{modelSizeGB} <span className="text-xs text-on-surface-variant">GB</span></div>
-              </div>
-              <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
-                <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">KV-Cache</div>
-                <div className="text-2xl font-headline font-bold text-white mt-1">{kvCacheGB} <span className="text-xs text-on-surface-variant">GB</span></div>
-              </div>
-            </div>
-            <div className="mt-6">
-              <div className="flex justify-between items-center text-[10px] text-on-surface-variant uppercase mb-2 font-bold">
-                <span>Stability</span>
-                <span className="text-secondary font-mono">{stabilityPercent}%</span>
-              </div>
-              <div className="h-1.5 bg-surface-container-lowest rounded-full overflow-hidden">
-                <motion.div
-                  initial={{ width: 0 }}
-                  animate={{ width: `${stabilityPercent}%` }}
-                  transition={{ duration: 1, ease: "easeOut" }}
-                  className="h-full bg-secondary" 
-                />
-              </div>
-            </div>
-          </section>
-
-          {/* Health Monitor */}
-          <section className="bg-surface-container p-6 rounded-lg border border-outline-variant/10">
-            <div className="flex items-center gap-2 mb-6">
-              <CheckCircle className="w-4 h-4 text-secondary" />
-              <h4 className="text-xs font-bold uppercase tracking-widest">Health Monitor</h4>
-            </div>
-            <div className="space-y-4">
-              <div className="flex justify-between items-center text-xs">
-                <span className="text-on-surface-variant">Packet Loss</span>
-                <span className="font-mono text-white">{packetLossPercent}%</span>
-              </div>
-              <div className="flex justify-between items-center text-xs">
-                <span className="text-on-surface-variant">Thermal Status</span>
-                <span className="text-secondary font-bold">OPTIMAL</span>
-              </div>
-            </div>
-          </section>
+      {/* Metric Cards — full width */}
+      <div className="grid grid-cols-3 md:grid-cols-5 gap-6">
+        <MetricCard title="Total Runtime" value={si(totalRuntimeS, 's')} icon={<Timer className="w-8 h-8" />} />
+        <MetricCard title="Token Throughput" value={f(tokensPerSecond)} unit="tok/s" trend="↑ 4.2% Peak" icon={<Activity className="w-8 h-8" />} />
+<div className="bg-surface-container p-6 rounded-lg border-l-2 border-primary">
+          <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Input Tokens</div>
+          <div className="text-2xl font-headline font-bold text-white mt-2">{inputTokens}</div>
         </div>
-
-        {/* Right: Dynamic Metrics Bento */}
-        <div className="lg:col-span-8 grid grid-cols-1 md:grid-cols-3 gap-6">
-          {/* Row 1 */}
-          <MetricCard 
-            title="Total Runtime" 
-            value={totalRuntime}
-            icon={<Timer className="w-8 h-8" />} 
-          />
-          <MetricCard
-            title="Avg Tokens/s"
-            value={tokensPerSecond.toLocaleString()}
-            trend="↑ 4.2% Peak"
-            icon={<Activity className="w-8 h-8" />}
-          />
-          <MetricCard 
-            title="Total Energy" 
-            value={totalEnergy}
-            unit="kW/h" 
-            icon={<Zap className="w-8 h-8" />} 
-            color="text-tertiary"
-          />
-          
-          {/* Row 2 */}
-          <MetricCard
-            title="Peak RSS Mem"
-            value={memoryUsedGB}
-            unit="GB"
-            icon={<MemoryStick className="w-8 h-8" />}
-          />
-          <MetricCard
-            title="Avg CPU Util"
-            value={cpuUtilPercent}
-            unit="%"
-            progress={cpuUtilPercent}
-            icon={<Cpu className="w-8 h-8" />}
-          />
-          <MetricCard
-            title="Cache Misses"
-            value={cacheMissPercent}
-            unit="%"
-            icon={<AlertTriangle className="w-8 h-8 text-error" />}
-            isWarning
-          />
-
-          {/* Row 3 */}
-          <div className="bg-surface-container p-6 rounded-lg md:col-span-1 border-l-2 border-primary">
-            <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Input Tokens</div>
-            <div className="text-2xl font-headline font-bold text-white mt-2">{inputTokensM} <span className="text-sm text-on-surface-variant">M</span></div>
-          </div>
-          <div className="bg-surface-container p-6 rounded-lg md:col-span-1 border-l-2 border-secondary">
-            <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Output Tokens</div>
-            <div className="text-2xl font-headline font-bold text-white mt-2">{outputTokensM} <span className="text-sm text-on-surface-variant">M</span></div>
-          </div>
-          <div className="bg-surface-container p-6 rounded-lg md:col-span-1 border-l-2 border-tertiary">
-            <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Power Ribbon</div>
-            <div className="flex items-center gap-1 mt-2">
-              <div className="w-1 h-4 bg-tertiary/20"></div>
-              <div className="w-1 h-6 bg-tertiary/40"></div>
-              <div className="w-1 h-8 bg-tertiary/60"></div>
-              <div className="w-1 h-4 bg-tertiary"></div>
-              <span className="text-xs font-mono text-tertiary ml-2">{powerWatts}W</span>
-            </div>
-          </div>
+        <div className="bg-surface-container p-6 rounded-lg border-l-2 border-secondary">
+          <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Output Tokens</div>
+          <div className="text-2xl font-headline font-bold text-white mt-2">{outputTokens}</div>
         </div>
       </div>
 
-      {/* Latency Profile */}
-      <section className="bg-surface-container p-8 rounded-lg border border-outline-variant/10 overflow-hidden relative">
-        <h4 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant mb-8 flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
-          Inference Latency Profile
-        </h4>
-        <div className="h-64 w-full relative">
-          <svg className="w-full h-full" preserveAspectRatio="none" viewBox="0 0 800 200">
-            <defs>
-              <linearGradient id="latencyGradient" x1="0" x2="0" y1="0" y2="1">
-                <stop offset="0%" stopColor="#89ceff" stopOpacity="0.2" />
-                <stop offset="100%" stopColor="transparent" stopOpacity="0" />
-              </linearGradient>
-            </defs>
-            <motion.path 
-              initial={{ pathLength: 0 }}
-              animate={{ pathLength: 1 }}
-              transition={{ duration: 2, ease: "easeInOut" }}
-              d="M0 150 Q 100 130, 200 160 T 400 100 T 600 50 T 800 120" 
-              fill="none" 
-              stroke="#89ceff" 
-              strokeWidth="2" 
-            />
-            <motion.path 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 1, duration: 1 }}
-              d="M0 150 Q 100 130, 200 160 T 400 100 T 600 50 T 800 120 V 200 H 0 Z" 
-              fill="url(#latencyGradient)" 
-            />
-          </svg>
-          <div className="absolute bottom-4 left-4 flex gap-4 text-[10px] font-mono text-on-surface-variant">
-            <span className="flex items-center gap-1"><span className="w-2 h-2 bg-primary"></span> ACTIVE THREADS (128)</span>
+      {/* Summary boxes — three columns */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        {/* Model Summary */}
+        <section className="bg-surface-container p-6 rounded-lg border border-outline-variant/10 relative overflow-hidden group">
+          <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+            <Zap className="w-16 h-16 text-primary" />
           </div>
-        </div>
-      </section>
+          <h2 className="font-headline text-xl font-bold text-white mb-4 flex items-center gap-2">
+            <Info className="w-5 h-5 text-primary" />
+            Model Summary
+          </h2>
+          <p className="text-sm text-on-surface-variant leading-relaxed mb-6">
+            Transformer-based architecture optimized for low-latency active inference. FP16 precision kernels with quantization-aware paths.
+          </p>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Model Size</div>
+              <div className="text-2xl font-headline font-bold text-white mt-1">{si(modelSizeBytes, 'B')}</div>
+            </div>
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Peak RSS</div>
+              <div className="text-2xl font-headline font-bold text-white mt-1">{si(memoryUsedBytes, 'B')}</div>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-4 mt-4">
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold mb-1">L1 Misses</div>
+              <div className="text-lg font-headline font-bold text-white">{si(papiL1Misses, '')}</div>
+            </div>
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold mb-1">L2 Misses</div>
+              <div className="text-lg font-headline font-bold text-white">{si(papiL2Misses, '')}</div>
+            </div>
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold mb-1">L3 Misses</div>
+              <div className="text-lg font-headline font-bold text-white">{si(papiL3Misses, '')}</div>
+            </div>
+          </div>
+        </section>
+
+        {/* KV Cache */}
+        <section className="bg-surface-container p-6 rounded-lg border border-outline-variant/10 relative overflow-hidden group">
+          <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+            <Activity className="w-16 h-16 text-secondary" />
+          </div>
+          <h2 className="font-headline text-xl font-bold text-white mb-4 flex items-center gap-2">
+            <Activity className="w-5 h-5 text-secondary" />
+            KV Cache
+          </h2>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Capacity</div>
+              <div className="text-2xl font-headline font-bold text-white mt-1">{si(kvCapacityBytes, 'B')}</div>
+            </div>
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Used</div>
+              <div className="text-2xl font-headline font-bold text-white mt-1">{si(kvUsedBytes, 'B')}</div>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4 mt-4">
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Token Capacity</div>
+              <div className="text-2xl font-headline font-bold text-white mt-1">{si(kvTokensCapacity, '')}</div>
+            </div>
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Tokens Used</div>
+              <div className="text-2xl font-headline font-bold text-white mt-1">{kvTokensUsed}</div>
+            </div>
+          </div>
+          <div className="mt-6">
+            <div className="flex justify-between items-center text-[10px] text-on-surface-variant uppercase mb-2 font-bold">
+              <span>Utilization</span>
+              <span className="text-secondary font-mono">{f(kvUtilPercent)}%</span>
+            </div>
+            <div className="h-1.5 bg-surface-container-lowest rounded-full overflow-hidden">
+              <motion.div
+                initial={{ width: 0 }}
+                animate={{ width: `${kvUtilPercent}%` }}
+                transition={{ duration: 1, ease: "easeOut" }}
+                className="h-full bg-secondary"
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* Energy & CPU */}
+        <section className="bg-surface-container p-6 rounded-lg border border-outline-variant/10 relative overflow-hidden group">
+          <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+            <Zap className="w-16 h-16 text-tertiary" />
+          </div>
+          <h2 className="font-headline text-xl font-bold text-white mb-4 flex items-center gap-2">
+            <Zap className="w-5 h-5 text-tertiary" />
+            Energy & CPU
+          </h2>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">CPU Util</div>
+              <div className="text-2xl font-headline font-bold text-white mt-1">{f(cpuUtilPercent)} <span className="text-xs text-on-surface-variant">%</span></div>
+            </div>
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Total Energy</div>
+              <div className="text-2xl font-headline font-bold text-tertiary mt-1">{si(energyPsysJ, 'J')}</div>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4 mt-4">
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">CPU Energy</div>
+              <div className="text-2xl font-headline font-bold text-white mt-1">{si(energyPkgJ, 'J')}</div>
+            </div>
+            <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
+              <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Cores Energy</div>
+              <div className="text-2xl font-headline font-bold text-white mt-1">{si(energyCoresJ, 'J')}</div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      {/* Roofline */}
+      {(() => {
+        const achievedGFLOPS = achievedFLOPS / 1e9;
+        const peakGFLOPS     = peakFLOPS / 1e9;
+        const logRidge    = Math.log10(Math.max(ridgePoint, 1e-9));
+        const logXMin     = -2;
+        const logPerfMin  = -2;
+        const logPeakGF   = Math.log10(Math.max(peakGFLOPS, 1e-9));
+        const logOI       = Math.log10(Math.max(arithmeticIntensity, 1e-9));
+        const dotX = logOI <= logRidge
+          ? 100 * (logOI - logXMin) / (logRidge - logXMin)
+          : 100 + 300 * (logOI - logRidge) / (3 - logRidge);
+        const dotY = Math.min(284, Math.max(148,
+          288 - 144 * (Math.log10(Math.max(achievedGFLOPS, 1e-9)) - logPerfMin) / (logPeakGF - logPerfMin)
+        ));
+        const isMemBound = arithmeticIntensity < ridgePoint;
+        return (
+          <section className="bg-surface-container p-6 rounded-lg border border-outline-variant/10">
+            <div className="flex justify-between items-center mb-6">
+              <h4 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+                Arithmetic Intensity — Entire Run
+              </h4>
+              <div className="text-[10px] font-mono text-outline">{f(arithmeticIntensity)} FLOPs/Byte</div>
+            </div>
+            <div className="flex gap-6">
+              <div className="flex-[2] h-72 roofline-grid border-b border-l border-outline/30 relative">
+                <svg className="absolute inset-0 w-full h-full">
+                  <path d="M 0 288 L 100 144 L 400 144" fill="none" stroke="#3e4850" strokeDasharray="4 4" strokeWidth="2" />
+                  <motion.circle
+                    initial={{ opacity: 0, scale: 0 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    cx={dotX} cy={dotY}
+                    fill="#89ceff" r="6"
+                    className="drop-shadow-[0_0_8px_#89ceff]"
+                  />
+                </svg>
+                <div className="absolute bottom-2 right-2 text-[8px] text-outline font-mono">Memory Bound → Compute Bound</div>
+                <div className={`absolute top-2 left-2 text-xs font-mono font-bold ${isMemBound ? 'text-error' : 'text-secondary'}`}>
+                  {isMemBound ? 'MEMORY BOUND' : 'COMPUTE BOUND'}
+                </div>
+              </div>
+
+              {/* Data panel */}
+              <div className="flex-1 space-y-4 font-mono text-[10px]">
+                <div>
+                  <div className="text-on-surface-variant uppercase font-bold mb-2 tracking-widest">Workload</div>
+                  <div className="space-y-2">
+                    {[
+                      { label: 'Achieved', value: si(achievedFLOPS, 'FLOPS/s') },
+                      { label: 'Total FLOPs', value: si(totalFLOPs, 'FLOPs') },
+                      { label: 'DRAM Bytes', value: si(dramBytes, 'B') },
+                      { label: 'OI', value: `${f(arithmeticIntensity)} FLOPs/B` },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="flex justify-between items-center border-b border-outline-variant/10 pb-1">
+                        <span className="text-on-surface-variant">{label}</span>
+                        <span className="text-white font-bold">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-on-surface-variant uppercase font-bold mb-2 tracking-widest">Hardware</div>
+                  <div className="space-y-2">
+                    {[
+                      { label: 'CPU', value: hwCpuModel.split('@')[0].trim() },
+                      { label: 'Cores', value: String(hwCores) },
+                      { label: 'Base / Boost', value: `${hwBaseGHz} / ${hwBoostGHz} GHz` },
+                      { label: 'Avg Clock', value: `${hwAvgGHz} GHz` },
+                      { label: 'ISA', value: hwISA },
+                      { label: 'FLOPs/Cycle', value: String(hwFlopsPerCycle) },
+                      { label: 'Peak', value: si(peakFLOPS, 'FLOPS/s') },
+                      { label: 'Mem BW', value: si(memBwBs, 'B/s') },
+                      { label: 'Ridge Point', value: `${f(ridgePoint)} FLOPs/B` },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="flex justify-between items-center border-b border-outline-variant/10 pb-1">
+                        <span className="text-on-surface-variant">{label}</span>
+                        <span className="text-white font-bold">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        );
+      })()}
     </div>
   );
 }

@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { View } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
+import { useAppState } from '../controller/AppContext';
 
 const FORMATS = [
   { id: 'json', label: 'JSON',  desc: 'Structured key-value data',    icon: FileJson        },
@@ -28,6 +29,7 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ currentView, onViewChange }: SidebarProps) {
+  const { state, set } = useAppState();
   const [showExport, setShowExport] = React.useState(false);
   const [exportFilename, setExportFilename] = React.useState('llama-metrics');
   const [exportLocation, setExportLocation] = React.useState('');
@@ -48,12 +50,14 @@ export default function Sidebar({ currentView, onViewChange }: SidebarProps) {
     setShowExport(false);
   };
 
+  const { selectedBlockLabel } = state;
+
   const navItems = [
     { id: 'top' as View, label: 'Top View', icon: LayoutDashboard },
     { id: 'phase' as View, label: 'Phase View', icon: GitBranch },
     { id: 'decoder' as View, label: 'Decoder Block', icon: Grid3X3 },
     { id: 'attention' as View, label: 'Attention/MLP', icon: Brain },
-    { id: 'layer' as View, label: 'Layer View', icon: Layers },
+    // { id: 'layer' as View, label: 'Layer View', icon: Layers },
   ];
 
   return (
@@ -217,23 +221,49 @@ export default function Sidebar({ currentView, onViewChange }: SidebarProps) {
       </div>
 
       <nav className="flex-1 px-4 space-y-1 mt-4">
-        {navItems.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => onViewChange(item.id)}
-            className={`w-full flex items-center gap-3 px-4 py-3 transition-all text-left ${
-              currentView === item.id 
-                ? 'text-primary font-bold bg-surface-container-highest border-r-4 border-primary' 
-                : 'text-outline hover:bg-surface-container-high'
-            }`}
-          >
-            <item.icon className="w-5 h-5" />
-            <span>{item.label}</span>
-          </button>
-        ))}
+        {navItems.map((item) => {
+          if (item.id === 'attention' && !selectedBlockLabel) return null;
+          const isAttention = item.id === 'attention';
+          const isActive = currentView === item.id;
+
+          return (
+            <button
+              key={item.id}
+              onClick={() => {
+                if (item.id !== 'attention') set('selectedBlockLabel', '');
+                onViewChange(item.id);
+              }}
+              className={`w-full flex items-center gap-3 py-3 transition-all text-left ${
+                isAttention ? 'pl-8 pr-4' : 'px-4'
+              } ${
+                isActive
+                  ? 'text-primary font-bold bg-surface-container-highest border-r-4 border-primary'
+                  : 'text-outline hover:bg-surface-container-high'
+              }`}
+            >
+              <item.icon className={`${isAttention ? 'w-4 h-4' : 'w-5 h-5'}`} />
+              <span className={isAttention ? 'text-[11px]' : ''}>{item.label}</span>
+            </button>
+          );
+        })}
       </nav>
 
       <div className="p-4 mt-auto space-y-4">
+        <div className="space-y-1">
+          <label className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant px-1">
+            Decimal Precision
+          </label>
+          <select
+            value={state.decimalPrecision}
+            onChange={e => set('decimalPrecision', Number(e.target.value))}
+            className="w-full bg-surface-container-high border border-outline-variant/20 text-white text-xs font-mono px-3 py-2 rounded focus:outline-none focus:border-primary/50"
+          >
+            {[0, 1, 2, 3, 4].map(n => (
+              <option key={n} value={n}>{n} decimal{n !== 1 ? 's' : ''}</option>
+            ))}
+          </select>
+        </div>
+
         <motion.button
           whileHover={{ scale: 0.98 }}
           whileTap={{ scale: 0.95 }}
@@ -243,7 +273,6 @@ export default function Sidebar({ currentView, onViewChange }: SidebarProps) {
           <Download className="w-4 h-4" />
           EXPORT METRICS
         </motion.button>
-        
       </div>
     </aside>
     </>

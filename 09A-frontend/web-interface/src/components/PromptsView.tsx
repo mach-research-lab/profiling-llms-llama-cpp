@@ -1,17 +1,8 @@
-import React from 'react';
-import {
-  MessageSquare,
-  Send,
-  History,
-  Trash2,
-  Copy,
-  Zap,
-  Terminal,
-  Cpu,
-  Activity,
-} from 'lucide-react';
+import React, {useEffect} from 'react';
+import { MessageSquare, Send, History, Trash2, Copy, Zap, Terminal, Cpu, Activity} from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAppState } from '@/src/controller/AppContext.tsx';
+import { fetchAndSetPapiEvents} from "@/src/controller/Controller.tsx";
 
 //   Chat window style more
   //   Selection for papievents should be clear and maybe hidden
@@ -25,17 +16,19 @@ import { useAppState } from '@/src/controller/AppContext.tsx';
 
 export default function PromptsView() {
   const { state, set } = useAppState();
-  const { contextLength, inferenceMessages: messages, availableHooks } = state;
+  const { contextLength, inferenceMessages: messages, availableHooks, maxTokens, papiEventsPerRun } = state;
   const [selectedPreset, setSelectedPreset] = React.useState<'general' | 'advanced'>('general');
   const [isRunning, setIsRunning] = React.useState(false);
   const [prompt, setPrompt] = React.useState('');
-  const [topP, setTopP] = React.useState(0.95);
-  const [maxTokens, setMaxTokens] = React.useState(528);
   const bottomRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    fetchAndSetPapiEvents(set);
+  }, []);
 
   const handleExecute = () => {
     if (!prompt.trim()) return;
@@ -328,18 +321,7 @@ export default function PromptsView() {
             `}</style>
             <h3 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant mb-6">Inference Parameters</h3>
             <div className="space-y-6">
-              <div className="space-y-3">
-                <div className="flex justify-between text-[10px] font-bold uppercase">
-                  <span className="text-on-surface-variant">Top-P</span>
-                  <span className="text-primary">{topP.toFixed(2)}</span>
-                </div>
-                <input
-                  type="range" min={0} max={1} step={0.01} value={topP}
-                  onChange={e => setTopP(Number(e.target.value))}
-                  className="param-slider w-full"
-                  style={{ background: `linear-gradient(to right, #89ceff ${topP * 100}%, rgba(255,255,255,0.08) ${topP * 100}%)` }}
-                />
-              </div>
+
               <div className="space-y-3">
                 <div className="flex justify-between text-[10px] font-bold uppercase">
                   <span className="text-on-surface-variant">Max Tokens</span>
@@ -347,9 +329,21 @@ export default function PromptsView() {
                 </div>
                 <input
                   type="range" min={16} max={1056} step={16} value={maxTokens}
-                  onChange={e => setMaxTokens(Number(e.target.value))}
+                  onChange={e => set('maxTokens', Number(e.target.value))}
                   className="param-slider w-full"
                   style={{ background: `linear-gradient(to right, #89ceff ${(maxTokens - 16) / (1056 - 16) * 100}%, rgba(255,255,255,0.08) ${(maxTokens - 16) / (1056 - 16) * 100}%)` }}
+                />
+              </div>
+              <div className="space-y-3">
+                <div className="flex justify-between text-[10px] font-bold uppercase">
+                  <span className="text-on-surface-variant">Papi Events per run</span>
+                  <span className="text-primary">{papiEventsPerRun}</span>
+                </div>
+                <input
+                    type="range" min={1} max={10} step={1} value={papiEventsPerRun}
+                    onChange={e => set('papiEventsPerRun', Number(e.target.value))}
+                    className="param-slider w-full"
+                    style={{ background: `linear-gradient(to right, #89ceff ${(papiEventsPerRun - 1) / (10 - 1) * 100}%, rgba(255,255,255,0.08) ${(papiEventsPerRun - 1) / (10 - 1) * 100}%)` }}
                 />
               </div>
             </div>
@@ -391,7 +385,7 @@ export default function PromptsView() {
                 className="overflow-hidden"
               >
                 <div className="bg-surface-container p-6 rounded-xl border border-outline-variant/10">
-                  <h3 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant mb-4">Available Hooks</h3>
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant mb-4">Available Papi Events</h3>
                   <div className="space-y-2">
                     {availableHooks.map(hook => (
                       <div key={hook.id} className="flex items-center justify-between p-3 bg-surface-container-low border border-outline-variant/10 rounded hover:border-primary/30 transition-all">

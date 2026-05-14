@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Box, Cpu, ChevronRight, AlertTriangle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAppState } from '@/src/controller/AppContext.tsx';
 import { View } from '../types';
+import { fetchAndSetModels } from "@/src/controller/Controller.tsx";
 
 interface ModelSelectionViewProps {
   onViewChange: (view: View) => void;
@@ -14,18 +15,27 @@ export default function ModelSelectionView({ onViewChange }: ModelSelectionViewP
   const selectedModel = models.find(m => m.id === selectedModelId);
   const [pendingModelId, setPendingModelId] = React.useState<string | null>(null);
 
+  //Updates the appstate with the models from the db
+  useEffect(() => {
+    fetchAndSetModels(set);
+  }, []);
+
+
+  // Lets the selected model be chosen in the app context
   const handleModelClick = (modelId: string) => {
     if (modelId === selectedModelId) return;
     if (state.hasRunInference) {
       setPendingModelId(modelId);
     } else {
       set('selectedModelId', modelId);
+      set('modelName', models.find(m => m.id === modelId)?.name ?? modelId);
     }
   };
 
   const confirmSwitch = () => {
     if (!pendingModelId) return;
     set('selectedModelId', pendingModelId);
+    set('modelName', models.find(m => m.id === pendingModelId)?.name ?? pendingModelId);
     set('inferenceMessages', []);
     set('hasRunInference', false);
     set('resultsUpdated', false);

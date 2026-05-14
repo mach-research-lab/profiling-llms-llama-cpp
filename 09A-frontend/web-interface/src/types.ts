@@ -19,6 +19,12 @@ export interface Model {
   energy: string;                                  // e.g. 'Low', 'Medium', 'High', 'Ultra-Low'
 }
 
+
+export interface PapiEvent{
+  id: string;
+  label: string;
+}
+
 export interface MetricCardProps {
   title: string;
   value: string;

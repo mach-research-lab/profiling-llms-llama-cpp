@@ -22,7 +22,7 @@ export default function App() {
       case 'phase':
         return <PhaseView />;
       case 'decoder':
-        return <DecoderBlockView />;
+        return <DecoderBlockView onViewChange={setCurrentView} />;
       case 'attention':
         return <AttentionMLPView />;
       case 'layer':
