@@ -209,7 +209,7 @@ def run_every_view(config: Config, event_per_tensor: int | None):
     run_view(config, False, Run_type.TENSOR_OP_VIEW, False, event_per_tensor)
 
     #Complement JSON:s with additional fields
-    if config.custom_events is not None:
+    if config.custom_events is None:
         complement_phase_json(os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path),
                               os.path.join(OUTPUT_PATH, Run_type.TENSOR_OP_VIEW.path),
                               None, os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path))
