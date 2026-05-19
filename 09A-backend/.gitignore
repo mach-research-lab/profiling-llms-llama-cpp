@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+.venv/
+
+# Plots / bilder
+plots/
+*.png
+
+# Data 
+*.csv
+
+# VS Code
+.vscode/
+
+#models
+*.gguf

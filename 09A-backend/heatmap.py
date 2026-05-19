@@ -62,6 +62,7 @@ RESULTS_DIR = SCRIPT_DIR.parent / "run_every_view_results"
 DEFAULT_JSON_DIR = RESULTS_DIR
 DEFAULT_SQLITE_DB = RESULTS_DIR / "tensor_op_view.db"
 DEFAULT_OUTPUT = SCRIPT_DIR / "plots" / "heatmap.png"
+DEFAULT_JSON_OUTPUT = SCRIPT_DIR / "plots" / "heatmap.json"
 
 CANONICAL_COLUMNS = {
     "phase": "phase",
@@ -534,6 +535,58 @@ def build_layer_metric_matrix(
     return matrix.reindex(op_order)
 
 
+def build_layer_ipc_matrix(
+    df: pd.DataFrame,
+    top_n: int | None = 20,
+    include_special_layers: bool = False,
+) -> pd.DataFrame:
+    if "tot_ins" not in df.columns or "tot_cyc" not in df.columns:
+        raise ValueError(
+            "IPC requires tot_ins and tot_cyc columns. Add them in the DB/PAPI collection first."
+        )
+
+    layered = add_layer_column(df, include_special_layers=include_special_layers)
+    if layered.empty:
+        raise ValueError("No rows with layer information were found.")
+
+    aggregated = (
+        layered.groupby(["op_type", "layer"], as_index=False)[["tot_ins", "tot_cyc"]]
+        .sum()
+        .sort_values(["op_type", "layer"])
+    )
+    aggregated["ipc"] = 0.0
+    non_zero_cycles = aggregated["tot_cyc"] != 0
+    aggregated.loc[non_zero_cycles, "ipc"] = (
+        aggregated.loc[non_zero_cycles, "tot_ins"]
+        / aggregated.loc[non_zero_cycles, "tot_cyc"]
+    )
+
+    if top_n is not None and top_n > 0:
+        top_ops = (
+            aggregated.groupby("op_type", as_index=False)["tot_cyc"]
+            .sum()
+            .sort_values("tot_cyc", ascending=False)
+            .head(top_n)["op_type"]
+        )
+        aggregated = aggregated[aggregated["op_type"].isin(set(top_ops))].copy()
+
+    matrix = aggregated.pivot_table(
+        index="op_type",
+        columns="layer",
+        values="ipc",
+        aggfunc="first",
+        fill_value=0.0,
+    )
+
+    sorted_columns = sorted(
+        matrix.columns,
+        key=lambda layer: (not str(layer).startswith("L"), str(layer)),
+    )
+    matrix = matrix.reindex(columns=sorted_columns)
+    op_order = matrix.mean(axis=1).sort_values(ascending=False).index
+    return matrix.reindex(op_order)
+
+
 def build_operation_share_matrix(
     df: pd.DataFrame,
     phases: list[str] | None = None,
@@ -578,6 +631,58 @@ def build_operation_share_matrix(
     return matrix.reindex(op_order)
 
 
+def build_operation_share_ipc_matrix(
+    df: pd.DataFrame,
+    phases: list[str] | None = None,
+    top_n: int | None = 20,
+) -> pd.DataFrame:
+    selected_phases = phases if phases else ["prefill", "decode"]
+    filtered = filter_phases(df, selected_phases)
+    if "tot_ins" not in filtered.columns or "tot_cyc" not in filtered.columns:
+        raise ValueError(
+            "Phase IPC requires tot_ins and tot_cyc columns. Add them in the DB/PAPI collection first."
+        )
+
+    aggregated = (
+        filtered.groupby(["phase", "op_type"], as_index=False)[["tot_ins", "tot_cyc"]]
+        .sum()
+        .sort_values(["phase", "op_type"])
+    )
+    aggregated["ipc"] = 0.0
+    non_zero_cycles = aggregated["tot_cyc"] != 0
+    aggregated.loc[non_zero_cycles, "ipc"] = (
+        aggregated.loc[non_zero_cycles, "tot_ins"]
+        / aggregated.loc[non_zero_cycles, "tot_cyc"]
+    )
+
+    if top_n is not None and top_n > 0:
+        top_ops = (
+            aggregated.groupby("op_type", as_index=False)["tot_cyc"]
+            .sum()
+            .sort_values("tot_cyc", ascending=False)
+            .head(top_n)["op_type"]
+        )
+        aggregated = aggregated[aggregated["op_type"].isin(set(top_ops))].copy()
+
+    matrix = aggregated.pivot_table(
+        index="op_type",
+        columns="phase",
+        values="ipc",
+        aggfunc="first",
+        fill_value=0.0,
+    )
+
+    column_by_lower = {str(col).strip().lower(): col for col in matrix.columns}
+    decode_col = column_by_lower.get("decode")
+    prefill_col = column_by_lower.get("prefill")
+    matrix["prefill"] = matrix[prefill_col] if prefill_col is not None else 0.0
+    matrix["decode"] = matrix[decode_col] if decode_col is not None else 0.0
+    matrix["delta_ipc"] = matrix["decode"] - matrix["prefill"]
+    matrix = matrix[["prefill", "decode", "delta_ipc"]]
+    op_order = matrix[["prefill", "decode"]].mean(axis=1).sort_values(ascending=False).index
+    return matrix.reindex(op_order)
+
+
 def build_heatmap_matrix(
     df: pd.DataFrame,
     heatmap_kind: str,
@@ -609,10 +714,8 @@ def build_heatmap_matrix(
         return matrix, "Memory Heatmap", "Layer", value_column
 
     if kind == "ipc":
-        ipc_df = compute_ipc(filtered)
-        matrix = build_layer_metric_matrix(
-            ipc_df,
-            value_column="ipc",
+        matrix = build_layer_ipc_matrix(
+            filtered,
             top_n=top_n,
             include_special_layers=include_special_layers,
         )
@@ -621,7 +724,7 @@ def build_heatmap_matrix(
     if kind in {"op-share", "operation-share", "share"}:
         matrix = build_operation_share_matrix(filtered, phases=phases, top_n=top_n)
         time_column = resolve_time_column(filtered)
-        return matrix, "Phase Time Comparison Heatmap", "Metric", time_column
+        return matrix, "Phase Runtime Heatmap", "Metric", time_column
 
     if kind in {"op-share-memory", "memory-share"}:
         value_column = resolve_memory_column(filtered)
@@ -632,7 +735,11 @@ def build_heatmap_matrix(
             value_column=value_column,
             delta_column="delta_memory",
         )
-        return matrix, "Phase Memory Comparison Heatmap", "Metric", value_column
+        return matrix, "Phase Memory Heatmap", "Metric", value_column
+
+    if kind in {"op-share-ipc", "ipc-share"}:
+        matrix = build_operation_share_ipc_matrix(filtered, phases=phases, top_n=top_n)
+        return matrix, "Phase IPC Heatmap", "Metric", "ipc"
 
     raise ValueError(
         "Unknown heatmap kind. Expected one of: time, memory, ipc, op-share, op-share-ipc, op-share-memory."
@@ -775,6 +882,214 @@ def plot_heatmap(
     return output
 
 
+def _json_safe_number(value: object) -> float | int | None:
+    if pd.isna(value):
+        return None
+    numeric = float(value)
+    if numeric.is_integer():
+        return int(numeric)
+    return numeric
+
+
+def _finite_matrix_values(matrix: pd.DataFrame) -> np.ndarray:
+    values = matrix.astype(float).values
+    return values[np.isfinite(values)]
+
+
+def build_color_scale_payload(
+    matrix: pd.DataFrame,
+    *,
+    display_mode: str,
+    value_label: str,
+) -> dict[str, object]:
+    values = _finite_matrix_values(matrix)
+    positive_values = values[values > 0]
+
+    color_scale: dict[str, object] = {
+        "palette": "YlOrRd",
+        "scale": "linear",
+        "label": value_label,
+        "higher_is_hotter": True,
+        "zero_centered": False,
+    }
+
+    if values.size == 0:
+        return color_scale
+
+    color_scale["data_min"] = _json_safe_number(np.min(values))
+    color_scale["data_max"] = _json_safe_number(np.max(values))
+
+    if display_mode in {"time-log", "memory-log"} and positive_values.size > 0:
+        vmin = float(np.min(positive_values))
+        vmax = float(np.percentile(positive_values, 98))
+        if vmax <= vmin:
+            vmax = float(np.max(positive_values))
+        color_scale.update(
+            {
+                "palette": "YlOrRd",
+                "scale": "log",
+                "label": f"log-scaled {value_label} (clipped at p98)",
+                "vmin": _json_safe_number(vmin),
+                "vmax": _json_safe_number(vmax),
+                "clip": True,
+                "clip_percentile": 98,
+                "masked_values": "<= 0",
+                "masked_color": "#fffde7",
+            }
+        )
+        return color_scale
+
+    if display_mode in {"time-symlog", "memory-symlog"} and positive_values.size > 0:
+        max_abs = float(np.percentile(np.abs(values), 98))
+        if max_abs > 0:
+            linthresh = max(1.0, float(np.percentile(positive_values, 10)))
+            color_scale.update(
+                {
+                    "palette": "RdBu_r",
+                    "scale": "symlog",
+                    "label": f"sym-log {value_label} (clipped at p98)",
+                    "vmin": _json_safe_number(-max_abs),
+                    "vcenter": 0,
+                    "vmax": _json_safe_number(max_abs),
+                    "linthresh": _json_safe_number(linthresh),
+                    "clip": True,
+                    "clip_percentile": 98,
+                    "zero_centered": True,
+                    "higher_is_hotter": False,
+                }
+            )
+            return color_scale
+
+    if display_mode == "ipc-diverging":
+        max_abs = float(np.max(np.abs(values)))
+        if max_abs > 0:
+            color_scale.update(
+                {
+                    "palette": "RdBu_r",
+                    "scale": "diverging",
+                    "label": f"{value_label} delta-centered at 0",
+                    "vmin": _json_safe_number(-max_abs),
+                    "vcenter": 0,
+                    "vmax": _json_safe_number(max_abs),
+                    "zero_centered": True,
+                    "higher_is_hotter": False,
+                }
+            )
+            return color_scale
+
+    color_scale.update(
+        {
+            "vmin": _json_safe_number(np.min(values)),
+            "vmax": _json_safe_number(np.max(values)),
+        }
+    )
+    return color_scale
+
+
+def build_heatmap_json_payload(
+    matrix: pd.DataFrame,
+    *,
+    heatmap_kind: str,
+    title: str,
+    xlabel: str,
+    value_label: str,
+    display_mode: str,
+) -> dict[str, object]:
+    rows = [str(row) for row in matrix.index]
+    columns = [str(column) for column in matrix.columns]
+    values = [
+        [
+            _json_safe_number(matrix.iloc[row_index, column_index])
+            for column_index in range(len(columns))
+        ]
+        for row_index in range(len(rows))
+    ]
+
+    return {
+        "schema_version": 1,
+        "kind": heatmap_kind,
+        "title": title,
+        "x_label": xlabel,
+        "y_label": "Operation type",
+        "value_label": value_label,
+        "color_scale": build_color_scale_payload(
+            matrix,
+            display_mode=display_mode,
+            value_label=value_label,
+        ),
+        "rows": rows,
+        "columns": columns,
+        "values": values,
+    }
+
+
+def write_heatmap_json(
+    matrix: pd.DataFrame,
+    output_path: str | os.PathLike[str],
+    *,
+    heatmap_kind: str,
+    title: str,
+    xlabel: str,
+    value_label: str,
+    display_mode: str,
+) -> Path:
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = build_heatmap_json_payload(
+        matrix,
+        heatmap_kind=heatmap_kind,
+        title=title,
+        xlabel=xlabel,
+        value_label=value_label,
+        display_mode=display_mode,
+    )
+    with open(output, "w", encoding="utf-8") as handle:
+        handle.write(format_json_for_ui(payload))
+        handle.write("\n")
+    return output
+
+
+def is_json_scalar(value: object) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def format_json_for_ui(value: object, indent: int = 0) -> str:
+    space = " " * indent
+    next_indent = indent + 2
+    next_space = " " * next_indent
+
+    if is_json_scalar(value):
+        return json.dumps(value)
+
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        if all(is_json_scalar(item) for item in value):
+            return "[" + ", ".join(json.dumps(item) for item in value) + "]"
+
+        lines = ["["]
+        for index, item in enumerate(value):
+            suffix = "," if index < len(value) - 1 else ""
+            lines.append(f"{next_space}{format_json_for_ui(item, next_indent)}{suffix}")
+        lines.append(f"{space}]")
+        return "\n".join(lines)
+
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+
+        items = list(value.items())
+        lines = ["{"]
+        for index, (key, item) in enumerate(items):
+            suffix = "," if index < len(items) - 1 else ""
+            formatted_item = format_json_for_ui(item, next_indent)
+            lines.append(f"{next_space}{json.dumps(str(key))}: {formatted_item}{suffix}")
+        lines.append(f"{space}}}")
+        return "\n".join(lines)
+
+    return json.dumps(value)
+
+
 def create_heatmap(
     *,
     results_dir: str | os.PathLike[str] = DEFAULT_JSON_DIR,
@@ -787,8 +1102,9 @@ def create_heatmap(
     include_special_layers: bool = False,
     output_path: str | os.PathLike[str] = DEFAULT_OUTPUT,
     matrix_output_path: str | os.PathLike[str] | None = None,
+    json_output_path: str | os.PathLike[str] | None = DEFAULT_JSON_OUTPUT,
     annotate: bool = False,
-) -> tuple[pd.DataFrame, Path]:
+) -> tuple[pd.DataFrame, Path, Path | None]:
     if pd is None:
         raise RuntimeError(
             "pandas is not installed. Install it with `pip install pandas`."
@@ -816,7 +1132,7 @@ def create_heatmap(
                 phases=phases,
                 top_n=top_n,
             )
-            title = "Phase Time Comparison Heatmap"
+            title = "Phase Runtime Heatmap"
             xlabel = "Metric"
             display_mode = "time-symlog"
             handled = True
@@ -830,7 +1146,7 @@ def create_heatmap(
                 phases=phases,
                 top_n=top_n,
             )
-            title = "Phase IPC Comparison Heatmap"
+            title = "Phase IPC Heatmap"
             xlabel = "Metric"
             display_mode = "ipc-diverging"
             handled = True
@@ -845,7 +1161,7 @@ def create_heatmap(
                 phases=phases,
                 top_n=top_n,
             )
-            title = "Phase Memory Comparison Heatmap"
+            title = "Phase Memory Heatmap"
             xlabel = "Metric"
             display_mode = "memory-symlog"
             handled = True
@@ -877,11 +1193,25 @@ def create_heatmap(
             display_mode = "memory-symlog"
         elif kind in {"memory", "memory-pressure", "llc", "cache-misses"}:
             display_mode = "memory-log"
+        elif kind in {"op-share-ipc", "ipc-share"}:
+            display_mode = "ipc-diverging"
 
     if matrix_output_path is not None:
         matrix_output = Path(matrix_output_path)
         matrix_output.parent.mkdir(parents=True, exist_ok=True)
         matrix.to_csv(matrix_output)
+
+    json_path = None
+    if json_output_path is not None:
+        json_path = write_heatmap_json(
+            matrix,
+            json_output_path,
+            heatmap_kind=kind,
+            title=title,
+            xlabel=xlabel,
+            value_label=value_label,
+            display_mode=display_mode,
+        )
 
     plot_path = plot_heatmap(
         matrix,
@@ -892,7 +1222,7 @@ def create_heatmap(
         display_mode=display_mode,
         annotate=annotate,
     )
-    return matrix, plot_path
+    return matrix, plot_path, json_path
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -931,6 +1261,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT), help="Where to save the heatmap image")
     parser.add_argument("--matrix-out", help="Optional path for saving the heatmap matrix as CSV")
+    parser.add_argument(
+        "--json-out",
+        default=str(DEFAULT_JSON_OUTPUT),
+        help="Where to save the heatmap data as JSON for the UI",
+    )
+    parser.add_argument(
+        "--no-json-out",
+        action="store_true",
+        help="Do not write the heatmap data JSON file",
+    )
     parser.add_argument("--annotate", action="store_true", help="Write values inside each heatmap cell")
     return parser
 
@@ -1032,9 +1372,9 @@ def prompt_interactive_args() -> argparse.Namespace:
             ("ipc", "IPC heatmap"),
         ],
         "phase": [
-            ("op-share", "Phase runtime comparison heatmap"),
-            ("op-share-memory", "Phase memory comparison heatmap"),
-            ("op-share-ipc", "Phase IPC comparison heatmap"),
+            ("op-share", "Phase runtime heatmap"),
+            ("op-share-memory", "Phase memory heatmap"),
+            ("op-share-ipc", "Phase IPC heatmap"),
         ],
     }
     metric_options = metric_options_by_view[selected_view]
@@ -1060,6 +1400,8 @@ def prompt_interactive_args() -> argparse.Namespace:
         include_special_layers=False,
         output=str(DEFAULT_OUTPUT),
         matrix_out=None,
+        json_out=str(DEFAULT_JSON_OUTPUT),
+        no_json_out=False,
         annotate=True,
     )
 
@@ -1071,7 +1413,8 @@ def main() -> None:
     else:
         args = parser.parse_args()
 
-    matrix, plot_path = create_heatmap(
+    json_output_path = None if args.no_json_out else args.json_out
+    matrix, plot_path, json_path = create_heatmap(
         results_dir=args.results_dir,
         db_path=args.db_path,
         sql=args.sql,
@@ -1082,10 +1425,13 @@ def main() -> None:
         include_special_layers=args.include_special_layers,
         output_path=args.output,
         matrix_output_path=args.matrix_out,
+        json_output_path=json_output_path,
         annotate=args.annotate,
     )
 
     print(f"Saved heatmap to: {plot_path}")
+    if json_path is not None:
+        print(f"Saved heatmap data JSON to: {json_path}")
     print(f"Matrix shape: {matrix.shape[0]} x {matrix.shape[1]}")
 
 
