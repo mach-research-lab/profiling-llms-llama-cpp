@@ -20,7 +20,7 @@ from run_handler import Config, run_every_view
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 LLAMA_ROOT  = os.path.dirname(SCRIPT_DIR)
-MODELS_ROOT = os.path.join(os.path.expanduser("~"), "shared/models")
+MODELS_ROOT = os.path.join(LLAMA_ROOT, "models/models")
 
 AVAILABLE_EVENTS = get_available_events()
 
