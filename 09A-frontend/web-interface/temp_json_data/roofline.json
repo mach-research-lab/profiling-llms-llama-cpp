@@ -1,0 +1,25 @@
+{
+  "label": "Entire program",
+  "x": 0.222111,
+  "y": 1.342834,
+  "total_flops": 343464517,
+  "l3_misses": null,
+  "dram_bytes": 1546364416,
+  "time_seconds": 0.255776,
+  "oi": 0.222111,
+  "achieved_gflops": 1.342834,
+  "bound": "memory",
+  "source": "json",
+  "hardware": {
+    "cpu_model": "11th Gen Intel(R) Core(TM) i7-1185G7 @ 3.00GHz",
+    "cores": 4,
+    "base_ghz": 3.0,
+    "boost_ghz": 4.8,
+    "avg_ghz": 3.9,
+    "isa": "AVX-512",
+    "flops_per_cycle": 32,
+    "peak_gflops": 499.2,
+    "mem_bw_gbs": 30.0,
+    "ridge_point": 16.64
+  }
+}

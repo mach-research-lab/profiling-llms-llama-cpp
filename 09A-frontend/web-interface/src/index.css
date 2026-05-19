@@ -1,0 +1,45 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-headline: "Space Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-background: #060e20;
+  --color-surface: #0b1326;
+  --color-surface-container: #171f33;
+  --color-surface-container-low: #131b2e;
+  --color-surface-container-high: #222a3d;
+  --color-surface-container-highest: #2d3449;
+  
+  --color-primary: #89ceff;
+  --color-on-primary: #00344d;
+  --color-secondary: #4edea3;
+  --color-on-secondary: #003824;
+  --color-tertiary: #ffb95f;
+  --color-on-tertiary: #472a00;
+  --color-error: #ffb4ab;
+  --color-on-error: #690005;
+  
+  --color-on-surface: #dae2fd;
+  --color-on-surface-variant: #bec8d2;
+  --color-outline: #88929b;
+  --color-outline-variant: #3e4850;
+}
+
+@layer base {
+  body {
+    @apply bg-background text-on-surface font-sans antialiased;
+  }
+}
+
+.data-grid-pattern {
+  background-image: radial-gradient(circle, #2d3449 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.roofline-grid {
+  background-image: radial-gradient(circle, #3e4850 1px, transparent 1px);
+  background-size: 20px 20px;
+}

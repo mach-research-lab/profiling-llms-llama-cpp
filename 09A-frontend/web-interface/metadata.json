@@ -1,0 +1,6 @@
+{
+  "name": "LLama CPP Inference ",
+  "description": "A high-performance monitoring and orchestration console for AI model inference, featuring real-time telemetry, phase analytics, and layer-level execution tracing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
