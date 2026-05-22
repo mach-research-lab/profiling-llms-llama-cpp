@@ -39,30 +39,49 @@ export default function PhaseView() {
   }
 
   // Raw values per row (used for cell labels in raw display mode)
-  const rawMatMul     = decodeBlocks.map((b: any) => b.subcomponents.attention.FLOPs + b.subcomponents.MLP.FLOPs);
-  const rawSoftmax    = decodeBlocks.map((b: any) => b.subcomponents.attention.FLOPs);
-  const rawKvCache    = decodeBlocks.map((b: any) => b.subcomponents.attention.bytes_moved);
-  const rawActivation = decodeBlocks.map((b: any) => b.subcomponents.MLP.FLOPs);
-  const rawResidual   = decodeBlocks.map((b: any) => b.runtime_ms);
+  const rawMatMul     = decodeBlocks.map((b: any) => (b.subcomponents?.attention?.FLOPs ?? 0) + (b.subcomponents?.MLP?.FLOPs ?? 0));
+  const rawSoftmax    = decodeBlocks.map((b: any) => b.subcomponents?.attention?.FLOPs ?? 0);
+  const rawKvCache    = decodeBlocks.map((b: any) => b.subcomponents?.attention?.bytes_moved ?? 0);
+  const rawActivation = decodeBlocks.map((b: any) => b.subcomponents?.MLP?.FLOPs ?? 0);
+  const rawResidual   = decodeBlocks.map((b: any) => b.runtime_ms ?? 0);
 
   // Fake quantitative values for ops without real profiling data yet
   const fakeRope      = decodeBlocks.map((_: any, i: number) => 1.2e6 + i * 8e3);
   const fakeLayerNorm = decodeBlocks.map((_: any, i: number) => 0.9e6 + i * 5e3);
 
-  // Normalise all rows against a single global maximum so the colour scale is shared
-  const allRawOpValues = [...rawMatMul, ...fakeRope, ...rawSoftmax, ...rawKvCache, ...rawActivation, ...fakeLayerNorm, ...rawResidual];
-  const globalOpMax = Math.max(...allRawOpValues, 1e-9);
-  const normGlobal = (arr: number[]) => arr.map(v => v / globalOpMax);
+  // Normalise each column across all blocks individually to preserve relative hotspot colors
+  const normMatMul     = norm(rawMatMul);
+  const normRope        = norm(fakeRope);
+  const normSoftmax     = norm(rawSoftmax);
+  const normKvCache     = norm(rawKvCache);
+  const normActivation  = norm(rawActivation);
+  const normLayerNorm   = norm(fakeLayerNorm);
+  const normResidual    = norm(rawResidual);
 
-  const blockOpRows = decodeBlocks.length > 0 ? [
-    { label: 'MAT_MUL',    values: normGlobal(rawMatMul),      rawValues: rawMatMul      },
-    { label: 'ROPE',        values: normGlobal(fakeRope),       rawValues: fakeRope       },
-    { label: 'SOFTMAX',     values: normGlobal(rawSoftmax),     rawValues: rawSoftmax     },
-    { label: 'KV_CACHE',    values: normGlobal(rawKvCache),     rawValues: rawKvCache     },
-    { label: 'ACTIVATION',  values: normGlobal(rawActivation),  rawValues: rawActivation  },
-    { label: 'LAYER_NORM',  values: normGlobal(fakeLayerNorm),  rawValues: fakeLayerNorm  },
-    { label: 'RESIDUAL',    values: normGlobal(rawResidual),    rawValues: rawResidual    },
-  ] : [];
+  const OP_COLUMNS = ['MAT_MUL', 'ROPE', 'SOFTMAX', 'KV_CACHE', 'ACTIVATION', 'LAYER_NORM', 'RESIDUAL'];
+
+  const blockOpRowsInverted = decodeBlocks.length > 0 ? decodeBlocks.map((b: any, i: number) => {
+    const label = `B${i}`;
+    const values = [
+      normMatMul[i],
+      normRope[i],
+      normSoftmax[i],
+      normKvCache[i],
+      normActivation[i],
+      normLayerNorm[i],
+      normResidual[i]
+    ];
+    const rawValues = [
+      rawMatMul[i],
+      fakeRope[i],
+      rawSoftmax[i],
+      rawKvCache[i],
+      rawActivation[i],
+      fakeLayerNorm[i],
+      rawResidual[i]
+    ];
+    return { label, values, rawValues };
+  }) : [];
   const f = (n: number) => fmt(n, decimalPrecision);
   const si = (n: number, unit: string) => fmtSI(n, unit, decimalPrecision);
   const trend = (pct: number) => `${pct >= 0 ? '↑' : '↓'} ${Math.abs(pct)}%`;
@@ -135,17 +154,17 @@ export default function PhaseView() {
         />
       </div>
 
-      {/* Operation Heatmap — real decode blocks on x-axis */}
+      {/* Operation Heatmap — inverted block × op grid layout */}
       <Heatmap
         title="Operation Intensity per Decode Block"
-        description="Operation (Y) × Decode block (X) — raw FLOPs / bytes / ms"
-        stages={blockStages.length > 0 ? blockStages : ['No data']}
-        cellSize={60}
+        description="Decode block (Y) × Operation (X) — raw FLOPs / bytes / ms"
+        stages={OP_COLUMNS}
+        cellSize={45}
         displayMode="raw"
         formatValue={v => fmtSI(v, '', decimalPrecision)}
-        tabs={blockOpRows.length > 0
-          ? [{ label: 'Decode', rows: blockOpRows }]
-          : [{ label: 'Decode', rows: [{ label: 'Run inference', values: [] }] }]
+        tabs={blockOpRowsInverted.length > 0
+          ? [{ label: 'Decode', rows: blockOpRowsInverted }]
+          : [{ label: 'Decode', rows: [{ label: 'B0', values: [] }] }]
         }
       />
 

@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, RotateCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { View } from '../types';
 import { useAppState } from '../controller/AppContext';
@@ -14,6 +14,14 @@ export default function TopBar({ currentView, onViewChange }: TopBarProps) {
   const modelSelected = !!state.selectedModelId;
   const resultsUnlocked = state.hasRunInference;
   const resultsUpdated = state.resultsUpdated;
+
+  const handleNewRun = () => {
+    fetch('/api/run/cancel', { method: 'POST' }).catch((err) => console.error("Failed to cancel active runs:", err));
+    set('inferenceMessages', []);
+    set('hasRunInference', false);
+    set('resultsUpdated', false);
+    onViewChange('models');
+  };
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-md flex items-center w-full px-6 h-16 border-b border-outline-variant/10">
@@ -67,7 +75,7 @@ export default function TopBar({ currentView, onViewChange }: TopBarProps) {
             <AnimatePresence>
               {resultsUpdated && (
                 <motion.span
-                  key="dot"
+                   key="dot"
                   initial={{ scale: 0, opacity: 0 }}
                   animate={{ scale: 1, opacity: 1 }}
                   exit={{ scale: 0, opacity: 0 }}
@@ -85,7 +93,19 @@ export default function TopBar({ currentView, onViewChange }: TopBarProps) {
           </button>
         </nav>
 
-        <div className="w-32" />
+        <div className="flex justify-end items-center">
+          {modelSelected && (
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={handleNewRun}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-outline-variant/30 text-xs font-bold uppercase tracking-widest text-outline hover:text-white hover:border-outline-variant/60 hover:bg-surface-container-high transition-all"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              New Run
+            </motion.button>
+          )}
+        </div>
       </div>
     </header>
   );

@@ -447,6 +447,7 @@ int main(int argc, char ** argv) {
         }
 
         custom_print(custom_args.disable_prints, false, "\n");
+        custom_print(custom_args.disable_prints, true, "[TURN_DONE]\n");
 
         std::string response_text;
         for (auto & tok : response_tokens) {

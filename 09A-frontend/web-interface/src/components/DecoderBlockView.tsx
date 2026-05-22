@@ -25,55 +25,55 @@ export default function DecoderBlockView({ onViewChange }: { onViewChange: (v: V
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
 
   function navigateToBlock(block: any, blockId: number | string) {
-    const attn = block.subcomponents.attention;
-    const mlp  = block.subcomponents.MLP;
-    const totalUs = attn.runtime_us + mlp.runtime_us;
-    set('blockLatencyS',       block.runtime_ms / 1000);
-    set('attentionRuntimeS',   attn.runtime_us / 1_000_000);
-    set('attentionRuntimePct', totalUs > 0 ? attn.runtime_us / totalUs * 100 : 0);
-    set('attentionFLOPs',      attn.FLOPs);
-    set('attentionIntensity',  attn.arithmetic_intensity);
-    set('attentionBytesMoved', attn.bytes_moved);
-    set('attentionHitRate',    (1 - attn.cache_behavior.L3_miss_rate) * 100);
-    set('attentionIPC',        attn.IPC);
-    set('attentionFLOPsPerS',  attn.FLOPs / (attn.runtime_us / 1e6));
-    set('attentionL1Misses',   attn.papi.PAPI_L1_TCM);
-    set('attentionL2Misses',   attn.papi.PAPI_L2_TCM);
-    set('attentionL3Misses',   attn.cache_behavior.L3_misses);
-    set('attentionL3Accesses', attn.cache_behavior.L3_accesses);
-    set('mlpRuntimeS',         mlp.runtime_us / 1_000_000);
-    set('mlpRuntimePct',       totalUs > 0 ? mlp.runtime_us / totalUs * 100 : 0);
-    set('mlpFLOPs',            mlp.FLOPs);
-    set('mlpIntensity',        mlp.arithmetic_intensity);
-    set('mlpBytesMoved',       mlp.bytes_moved);
-    set('mlpHitRate',          (1 - mlp.cache_behavior.L3_miss_rate) * 100);
-    set('mlpIPC',              mlp.IPC);
-    set('mlpFLOPsPerS',        mlp.FLOPs / (mlp.runtime_us / 1e6));
-    set('mlpL1Misses',         mlp.papi.PAPI_L1_TCM);
-    set('mlpL2Misses',         mlp.papi.PAPI_L2_TCM);
-    set('mlpL3Misses',         mlp.cache_behavior.L3_misses);
-    set('mlpL3Accesses',       mlp.cache_behavior.L3_accesses);
-    set('selectedBlockLabel',  `Block #${blockId} (${block.block_type})`);
+    const attn = block?.subcomponents?.attention ?? { runtime_us: 0, FLOPs: 0, arithmetic_intensity: 0, bytes_moved: 0, cache_behavior: { L3_miss_rate: 0, L3_misses: 0, L3_accesses: 0 }, IPC: 0, papi: {} };
+    const mlp  = block?.subcomponents?.MLP ?? { runtime_us: 0, FLOPs: 0, arithmetic_intensity: 0, bytes_moved: 0, cache_behavior: { L3_miss_rate: 0, L3_misses: 0, L3_accesses: 0 }, IPC: 0, papi: {} };
+    const totalUs = (attn.runtime_us ?? 0) + (mlp.runtime_us ?? 0);
+    set('blockLatencyS',       (block?.runtime_ms ?? 0) / 1000);
+    set('attentionRuntimeS',   (attn.runtime_us ?? 0) / 1_000_000);
+    set('attentionRuntimePct', totalUs > 0 ? (attn.runtime_us ?? 0) / totalUs * 100 : 0);
+    set('attentionFLOPs',      attn.FLOPs ?? 0);
+    set('attentionIntensity',  attn.arithmetic_intensity ?? 0);
+    set('attentionBytesMoved', attn.bytes_moved ?? 0);
+    set('attentionHitRate',    (1 - (attn.cache_behavior?.L3_miss_rate ?? 0)) * 100);
+    set('attentionIPC',        attn.IPC ?? 0);
+    set('attentionFLOPsPerS',  (attn.FLOPs ?? 0) / ((attn.runtime_us ?? 1) / 1e6));
+    set('attentionL1Misses',   attn.papi?.PAPI_L1_TCM ?? 0);
+    set('attentionL2Misses',   attn.papi?.PAPI_L2_TCM ?? 0);
+    set('attentionL3Misses',   attn.cache_behavior?.L3_misses ?? 0);
+    set('attentionL3Accesses', attn.cache_behavior?.L3_accesses ?? 0);
+    set('mlpRuntimeS',         (mlp.runtime_us ?? 0) / 1_000_000);
+    set('mlpRuntimePct',       totalUs > 0 ? (mlp.runtime_us ?? 0) / totalUs * 100 : 0);
+    set('mlpFLOPs',            mlp.FLOPs ?? 0);
+    set('mlpIntensity',        mlp.arithmetic_intensity ?? 0);
+    set('mlpBytesMoved',       mlp.bytes_moved ?? 0);
+    set('mlpHitRate',          (1 - (mlp.cache_behavior?.L3_miss_rate ?? 0)) * 100);
+    set('mlpIPC',              mlp.IPC ?? 0);
+    set('mlpFLOPsPerS',        (mlp.FLOPs ?? 0) / ((mlp.runtime_us ?? 1) / 1e6));
+    set('mlpL1Misses',         mlp.papi?.PAPI_L1_TCM ?? 0);
+    set('mlpL2Misses',         mlp.papi?.PAPI_L2_TCM ?? 0);
+    set('mlpL3Misses',         mlp.cache_behavior?.L3_misses ?? 0);
+    set('mlpL3Accesses',       mlp.cache_behavior?.L3_accesses ?? 0);
+    set('selectedBlockLabel',  `Block #${blockId} (${block?.block_type ?? 'Unknown'})`);
     onViewChange('attention');
   }
 
-  const totalRuntimeMs = decoderBlockList.reduce((sum: number, b: any) => sum + b.runtime_ms, 0);
+  const totalRuntimeMs = decoderBlockList.reduce((sum: number, b: any) => sum + (b?.runtime_ms ?? 0), 0);
 
   const prefillBlocks = decoderBlockList
     .map((b: any, i: number) => ({ block: b, idx: i }))
-    .filter(({ block }) => block.block_type === 'Prefill');
+    .filter(({ block }) => block?.block_type === 'Prefill');
   const decodeBlocks = decoderBlockList
     .map((b: any, i: number) => ({ block: b, idx: i }))
-    .filter(({ block }) => block.block_type === 'Decode');
+    .filter(({ block }) => block?.block_type === 'Decode');
 
   function blockMetrics(b: any) {
-    const attn = b.subcomponents.attention;
-    const mlp  = b.subcomponents.MLP;
-    const totalFLOPs = attn.FLOPs + mlp.FLOPs;
-    const totalBytes = attn.bytes_moved + mlp.bytes_moved;
-    const hitRate    = (1 - (attn.cache_behavior.L3_miss_rate + mlp.cache_behavior.L3_miss_rate) / 2) * 100;
+    const attn = b?.subcomponents?.attention ?? { FLOPs: 0, bytes_moved: 0, cache_behavior: { L3_miss_rate: 0 } };
+    const mlp  = b?.subcomponents?.MLP ?? { FLOPs: 0, bytes_moved: 0, cache_behavior: { L3_miss_rate: 0 } };
+    const totalFLOPs = (attn.FLOPs ?? 0) + (mlp.FLOPs ?? 0);
+    const totalBytes = (attn.bytes_moved ?? 0) + (mlp.bytes_moved ?? 0);
+    const hitRate    = (1 - ((attn.cache_behavior?.L3_miss_rate ?? 0) + (mlp.cache_behavior?.L3_miss_rate ?? 0)) / 2) * 100;
     const intensity  = totalBytes > 0 ? totalFLOPs / totalBytes : 0;
-    const sharePct   = totalRuntimeMs > 0 ? b.runtime_ms / totalRuntimeMs * 100 : 0;
+    const sharePct   = totalRuntimeMs > 0 ? (b?.runtime_ms ?? 0) / totalRuntimeMs * 100 : 0;
     const isWarning  = hitRate < 50;
     return { attn, mlp, totalFLOPs, totalBytes, hitRate, intensity, sharePct, isWarning };
   }
@@ -210,11 +210,11 @@ export default function DecoderBlockView({ onViewChange }: { onViewChange: (v: V
                       </div>
                       <div className="grid grid-cols-2 divide-x divide-outline-variant/20">
                         {[
-                          { label: 'Attention', icon: <Brain className="w-4 h-4 text-primary"   />, color: 'text-primary',   data: block.subcomponents.attention },
-                          { label: 'MLP (FFN)',  icon: <Cpu   className="w-4 h-4 text-secondary" />, color: 'text-secondary', data: block.subcomponents.MLP       },
+                          { label: 'Attention', icon: <Brain className="w-4 h-4 text-primary"   />, color: 'text-primary',   data: block?.subcomponents?.attention ?? { cache_behavior: { L3_miss_rate: 0 }, runtime_us: 0, FLOPs: 0, bytes_moved: 0, arithmetic_intensity: 0 } },
+                          { label: 'MLP (FFN)',  icon: <Cpu   className="w-4 h-4 text-secondary" />, color: 'text-secondary', data: block?.subcomponents?.MLP ?? { cache_behavior: { L3_miss_rate: 0 }, runtime_us: 0, FLOPs: 0, bytes_moved: 0, arithmetic_intensity: 0 } },
                         ].map(({ label, icon, color, data }) => {
-                          const subHitRate = (1 - data.cache_behavior.L3_miss_rate) * 100;
-                          const runtimeS   = (data.runtime_us ?? 0) / 1_000_000;
+                          const subHitRate = (1 - (data?.cache_behavior?.L3_miss_rate ?? 0)) * 100;
+                          const runtimeS   = (data?.runtime_us ?? 0) / 1_000_000;
                           return (
                             <div key={label} className="p-6 space-y-4">
                               <div className="flex items-center gap-2 mb-4">
@@ -356,11 +356,11 @@ export default function DecoderBlockView({ onViewChange }: { onViewChange: (v: V
                       </div>
                       <div className="grid grid-cols-2 divide-x divide-outline-variant/20">
                         {[
-                          { label: 'Attention', icon: <Brain className="w-4 h-4 text-secondary" />, color: 'text-secondary', data: block.subcomponents.attention },
-                          { label: 'MLP (FFN)',  icon: <Cpu   className="w-4 h-4 text-tertiary"  />, color: 'text-tertiary',  data: block.subcomponents.MLP  },
+                          { label: 'Attention', icon: <Brain className="w-4 h-4 text-secondary" />, color: 'text-secondary', data: block?.subcomponents?.attention ?? { cache_behavior: { L3_miss_rate: 0 }, runtime_us: 0, FLOPs: 0, bytes_moved: 0, arithmetic_intensity: 0 } },
+                          { label: 'MLP (FFN)',  icon: <Cpu   className="w-4 h-4 text-tertiary"  />, color: 'text-tertiary',  data: block?.subcomponents?.MLP ?? { cache_behavior: { L3_miss_rate: 0 }, runtime_us: 0, FLOPs: 0, bytes_moved: 0, arithmetic_intensity: 0 } },
                         ].map(({ label, icon, color, data }) => {
-                          const subHitRate = (1 - data.cache_behavior.L3_miss_rate) * 100;
-                          const runtimeS   = (data.runtime_us ?? 0) / 1_000_000;
+                          const subHitRate = (1 - (data?.cache_behavior?.L3_miss_rate ?? 0)) * 100;
+                          const runtimeS   = (data?.runtime_us ?? 0) / 1_000_000;
                           return (
                             <div key={label} className="p-6 space-y-4">
                               <div className="flex items-center gap-2 mb-4">

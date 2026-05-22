@@ -1,26 +1,43 @@
 import React, {useEffect} from 'react';
-import { MessageSquare, Send, History, Trash2, Copy, Zap, Terminal, Cpu, Activity} from 'lucide-react';
+import { MessageSquare, Send, History, Trash2, Copy, Zap, Terminal, Cpu, Activity, CheckCircle2} from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAppState } from '@/src/controller/AppContext.tsx';
 import { fetchAndSetPapiEvents} from "@/src/controller/Controller.tsx";
 
-//   Chat window style more
-  //   Selection for papievents should be clear and maybe hidden
-  //   Info page for that aswel
-  //   Validation for papi event selection
-  //   Reuse the roofline
-// TODO:
-// TODO:
-// TODO:
-// TODO:
+interface PromptsViewProps {
+  onViewChange: (view: 'models' | 'prompts' | 'top' | 'phase' | 'decoder' | 'attention' | 'layer') => void;
+}
 
-export default function PromptsView() {
+export default function PromptsView({ onViewChange }: PromptsViewProps) {
   const { state, set } = useAppState();
   const { contextLength, inferenceMessages: messages, availableHooks, maxTokens, papiEventsPerRun } = state;
   const [selectedPreset, setSelectedPreset] = React.useState<'general' | 'advanced'>('general');
+  const [selectedEvents, setSelectedEvents] = React.useState<string[]>([]);
   const [isRunning, setIsRunning] = React.useState(false);
   const [prompt, setPrompt] = React.useState('');
+  const [sessionId, setSessionId] = React.useState<string | null>(null);
+  const [chatDone, setChatDone] = React.useState(false);
+  const [isProfiling, setIsProfiling] = React.useState(false);
+
+  // Profiling Progress Popup states
+  const [showProgressModal, setShowProgressModal] = React.useState(false);
+  const [activeStep, setActiveStep] = React.useState('Initializing Profiler');
+  const [progressPercent, setProgressPercent] = React.useState(0);
+  const [profilingLogs, setProfilingLogs] = React.useState<string[]>([]);
+  const terminalBottomRef = React.useRef<HTMLDivElement>(null);
+
+  const esRef = React.useRef<EventSource | null>(null);
   const bottomRef = React.useRef<HTMLDivElement>(null);
+  const messagesRef = React.useRef(messages);
+  React.useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  React.useEffect(() => {
+    if (showProgressModal) {
+      terminalBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [profilingLogs, showProgressModal]);
+
+  const isLocked = sessionId !== null;
 
   React.useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -30,23 +47,279 @@ export default function PromptsView() {
     fetchAndSetPapiEvents(set);
   }, []);
 
-  const handleExecute = () => {
+  // Helper: filter raw stdout lines to extract only assistant response text
+  const isNoiseLine = (line: string): boolean => {
+    const trimmed = line.trim();
+    if (!trimmed) return true;
+    if (trimmed.startsWith('PAPI:')) return true;
+    if (/^---\s*Turn\s+\d+/.test(trimmed)) return true;
+    if (trimmed === 'User input processed.') return true;
+    if (/^User \(or 'quit'/.test(trimmed)) return true;
+    if (/^Re-packing/.test(trimmed)) return true;
+    if (/^Final run count/.test(trimmed)) return true;
+    if (/^Running group/.test(trimmed)) return true;
+    if (/^Event /.test(trimmed)) return true;
+    return false;
+  };
+
+  const extractAssistantText = (line: string): string | null => {
+    // "Assistant: Hello! How can I help?" → "Hello! How can I help?"
+    const match = line.match(/^Assistant:\s*(.*)/);
+    if (match) return match[1];
+    return null;
+  };
+
+  // First prompt — starts the chat
+  const handleExecute = async () => {
     if (!prompt.trim()) return;
     const userText = prompt.trim();
     setPrompt('');
-    const withUser = [...messages, { role: 'user' as const, text: userText }];
+    const withUser = [...messagesRef.current, { role: 'user' as const, text: userText }];
     set('inferenceMessages', withUser);
+    messagesRef.current = withUser;
     setIsRunning(true);
-    setTimeout(() => {
-      setIsRunning(false);
-      set('hasRunInference', true);
-      set('resultsUpdated', true);
-      set('inferenceMessages', [...withUser, {
-        role: 'assistant' as const,
-        text: 'Inference complete. The arithmetic intensity of the SOFTMAX_KERNEL_NORM operation on an H100 at FP16 precision is approximately 161.0 FLOPs/Byte, placing it firmly in the compute-bound regime. Peak throughput was observed at 743 TFLOPS with a memory bandwidth utilization of 84.5%. Recommend enabling flash-attention v2 to reduce KV-cache pressure during the decode phase.',
-      }]);
-    }, 3000);
+    setChatDone(false);
+
+    try {
+      const selectedModel = state.models.find(m => m.id === state.selectedModelId);
+      const modelPath = selectedModel ? selectedModel.id : '';
+
+      const res = await fetch('/api/run/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model_path: modelPath,
+          prompt: userText,
+          n_predict: maxTokens,
+          papi_events_per_run: papiEventsPerRun,
+          custom_events: selectedPreset === 'advanced' && selectedEvents.length > 0 ? selectedEvents : null,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.detail || 'Failed to start chat.');
+      }
+
+      const { sessionId: sid } = await res.json();
+      setSessionId(sid);
+
+      const es = new EventSource(`/api/run/stream/${sid}`);
+      esRef.current = es;
+      let assistantBuffer = '';
+
+      es.onmessage = (e) => {
+        const msg = JSON.parse(e.data) as { line?: string; chat_done?: boolean; done?: boolean; error?: string };
+
+        if (msg.error) {
+          es.close(); esRef.current = null;
+          setSessionId(null); setIsRunning(false);
+          const updated = [...messagesRef.current, { role: 'assistant' as const, text: `Error: ${msg.error}` }];
+          set('inferenceMessages', updated); messagesRef.current = updated;
+          return;
+        }
+
+        if (msg.chat_done) {
+          // Chat process ended — keep sessionId alive for profiling
+          es.close(); esRef.current = null;
+          setIsRunning(false);
+          setChatDone(true);
+          // Flush remaining assistant buffer
+          if (assistantBuffer.trim()) {
+            const current = messagesRef.current;
+            const last = current[current.length - 1];
+            if (last?.role === 'assistant') {
+              const updated = [...current.slice(0, -1), { role: 'assistant' as const, text: assistantBuffer.trim() }];
+              set('inferenceMessages', updated); messagesRef.current = updated;
+            }
+          }
+          return;
+        }
+
+        if (msg.line !== undefined) {
+          const line = msg.line;
+
+          if (line.trim() === '[TURN_DONE]') {
+            setIsRunning(false);
+            // Flush remaining assistant buffer
+            if (assistantBuffer.trim()) {
+              const current = messagesRef.current;
+              const last = current[current.length - 1];
+              if (last?.role === 'assistant') {
+                const updated = [...current.slice(0, -1), { role: 'assistant' as const, text: assistantBuffer.trim() }];
+                set('inferenceMessages', updated); messagesRef.current = updated;
+              }
+            }
+            assistantBuffer = '';
+            return;
+          }
+
+          // Skip noise lines
+          if (isNoiseLine(line)) return;
+
+          // Check if it's an assistant response line
+          const assistantText = extractAssistantText(line);
+          if (assistantText !== null) {
+            // Start or continue the assistant response
+            assistantBuffer = assistantText;
+            const current = messagesRef.current;
+            const last = current[current.length - 1];
+            let updated: typeof current;
+            if (last?.role === 'assistant') {
+              updated = [...current.slice(0, -1), { role: 'assistant' as const, text: assistantBuffer }];
+            } else {
+              updated = [...current, { role: 'assistant' as const, text: assistantBuffer }];
+            }
+            set('inferenceMessages', updated); messagesRef.current = updated;
+          } else if (assistantBuffer) {
+            // Continuation of assistant text (multi-line responses)
+            assistantBuffer += '\n' + line;
+            const current = messagesRef.current;
+            const last = current[current.length - 1];
+            if (last?.role === 'assistant') {
+              const updated = [...current.slice(0, -1), { role: 'assistant' as const, text: assistantBuffer }];
+              set('inferenceMessages', updated); messagesRef.current = updated;
+            }
+          }
+        }
+      };
+
+      es.onerror = () => {
+        es.close(); esRef.current = null;
+        setIsRunning(false);
+      };
+    } catch (error: any) {
+      console.error(error);
+      setIsRunning(false); setSessionId(null);
+      const updated = [...messagesRef.current, { role: 'assistant' as const, text: `Error: ${error.message || error}` }];
+      set('inferenceMessages', updated); messagesRef.current = updated;
+    }
   };
+
+  // Follow-up prompts — sent to stdin of the running process
+  const handleFollowUp = async () => {
+    if (!prompt.trim() || !sessionId) return;
+    const userText = prompt.trim();
+    setPrompt('');
+    const updated = [...messagesRef.current, { role: 'user' as const, text: userText }];
+    set('inferenceMessages', updated);
+    messagesRef.current = updated;
+    setIsRunning(true);
+
+    try {
+      await fetch(`/api/run/prompt/${sessionId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: userText }),
+      });
+    } catch (err: any) {
+      console.error(err);
+      setIsRunning(false);
+    }
+  };
+
+  // Run profiling — ends the chat and runs the remaining profiling views
+  const handleProfile = async () => {
+    if (!sessionId) return;
+    setIsProfiling(true);
+    setShowProgressModal(true);
+    setActiveStep('Initializing PAPI events and model layers...');
+    setProgressPercent(5);
+    setProfilingLogs([]);
+
+    const statusMsg = [...messagesRef.current, { role: 'assistant' as const, text: '⏳ Running PAPI profiling across all views... This may take a minute.' }];
+    set('inferenceMessages', statusMsg); messagesRef.current = statusMsg;
+
+    try {
+      const res = await fetch(`/api/run/profile/${sessionId}`, { method: 'POST' });
+      if (!res.ok) {
+        throw new Error('Failed to start profiling.');
+      }
+
+      // Open new EventSource for the profiling progress SSE stream
+      const es = new EventSource(`/api/run/stream/${sessionId}`);
+      
+      es.onmessage = async (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          
+          if (msg.line !== undefined) {
+            const line = msg.line;
+            setProfilingLogs((prev) => [...prev, line]);
+            
+            if (line.includes('Phase View group')) {
+              setActiveStep(`Running Phase View Profiling (${line.split('group ')[1]?.split(' ')[0] || ''})`);
+              setProgressPercent(15);
+            } else if (line.includes('Starting Top View')) {
+              setActiveStep('Running Top View Global Telemetry Analysis');
+              setProgressPercent(40);
+            } else if (line.includes('Starting Decoder Block View')) {
+              setActiveStep('Running Layer-by-Layer Decoder Block Analysis');
+              setProgressPercent(60);
+            } else if (line.includes('Starting Tensor-Op View')) {
+              setActiveStep('Measuring Custom PAPI Events & Core Tensor Operations');
+              setProgressPercent(80);
+            } else if (line.includes('Re-packing') || line.includes('Final run count')) {
+              setActiveStep('Consolidating hardware event parameters');
+            }
+          }
+
+          if (msg.done) {
+            es.close();
+            // Profiling complete!
+            setProgressPercent(100);
+            setActiveStep('Profiling Complete! Aggregating database telemetry...');
+            setIsProfiling(false);
+            setSessionId(null);
+            setChatDone(false);
+            set('hasRunInference', true);
+            set('resultsUpdated', true);
+            const { fetchAndSetResults } = await import('@/src/controller/Controller.tsx');
+            await fetchAndSetResults(set);
+            const final = [...messagesRef.current.slice(0, -1), { role: 'assistant' as const, text: '✅ Profiling complete! Redirecting you to the Top View results...' }];
+            set('inferenceMessages', final); messagesRef.current = final;
+            
+            setTimeout(() => {
+              setShowProgressModal(false);
+              onViewChange('top');
+            }, 1500);
+          }
+
+          if (msg.error) {
+            es.close();
+            setActiveStep(`Error: ${msg.error}`);
+            setProgressPercent(0);
+            const updated = [...messagesRef.current, { role: 'assistant' as const, text: `Profiling error: ${msg.error}` }];
+            set('inferenceMessages', updated); messagesRef.current = updated;
+            setTimeout(() => setShowProgressModal(false), 3000);
+            setIsProfiling(false);
+            setSessionId(null);
+            setChatDone(false);
+          }
+        } catch (parseErr) {
+          // skip unparseable lines
+        }
+      };
+
+      es.onerror = (err) => {
+        console.error('EventSource connection error:', err);
+      };
+
+    } catch (error: any) {
+      console.error(error);
+      const updated = [...messagesRef.current, { role: 'assistant' as const, text: `Profiling error: ${error.message || error}` }];
+      set('inferenceMessages', updated); messagesRef.current = updated;
+      setActiveStep(`Error: ${error.message || error}`);
+      setProgressPercent(0);
+      setTimeout(() => setShowProgressModal(false), 3000);
+      setIsProfiling(false);
+      setSessionId(null);
+      setChatDone(false);
+    }
+  };
+
+  // Route to the right handler depending on whether a run is active
+  const onSend = () => (sessionId && !chatDone) ? handleFollowUp() : handleExecute();
 
   const history = [
     { id: 1, text: "Explain the concept of active inference in transformer models.", time: "2m ago", tokens: 42 },
@@ -138,7 +411,7 @@ export default function PromptsView() {
                   <textarea
                     value={prompt}
                     onChange={e => setPrompt(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleExecute(); } }}
+                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(); } }}
                     className="w-full h-64 bg-surface-container-low border border-outline-variant/20 rounded-lg p-4 text-white font-mono text-sm focus:outline-none focus:border-primary/50 transition-colors resize-none"
                     placeholder="Enter prompt for real-time inference analysis..."
                   />
@@ -156,7 +429,7 @@ export default function PromptsView() {
                     <motion.button
                       whileHover={{ scale: 1.02 }}
                       whileTap={{ scale: 0.98 }}
-                      onClick={handleExecute}
+                      onClick={onSend}
                       disabled={!prompt.trim()}
                       className="bg-primary text-on-primary px-6 py-2 rounded font-headline font-bold text-sm flex items-center gap-2 shadow-[0_0_20px_rgba(137,206,255,0.2)] disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
                     >
@@ -285,26 +558,47 @@ export default function PromptsView() {
                 </div>
 
                 {/* Compact input bar */}
-                <div className="shrink-0 border-t border-outline-variant/10 px-4 py-3 flex items-end gap-3 bg-surface-container">
-                  <textarea
-                    value={prompt}
-                    onChange={e => setPrompt(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleExecute(); } }}
-                    rows={1}
-                    className="flex-1 bg-surface-container-low border border-outline-variant/20 rounded-lg px-4 py-2.5 text-white font-mono text-sm focus:outline-none focus:border-primary/50 transition-colors resize-none"
-                    style={{ maxHeight: '120px', overflowY: 'auto' }}
-                    placeholder="Continue the inference session..."
-                    disabled={isRunning}
-                  />
-                  <motion.button
-                    whileHover={{ scale: 1.04 }}
-                    whileTap={{ scale: 0.96 }}
-                    onClick={handleExecute}
-                    disabled={!prompt.trim() || isRunning}
-                    className="bg-primary text-on-primary p-2.5 rounded-lg shadow-[0_0_16px_rgba(137,206,255,0.2)] disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none shrink-0"
-                  >
-                    <Send className="w-4 h-4" />
-                  </motion.button>
+                <div className="shrink-0 border-t border-outline-variant/10 px-4 py-3 flex flex-col gap-3 bg-surface-container">
+                  {sessionId && !isProfiling && (
+                    <motion.button
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={handleProfile}
+                      disabled={isRunning}
+                      className="w-full bg-secondary text-on-secondary py-3 rounded-lg font-headline font-bold text-sm flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(137,206,255,0.15)] disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
+                    >
+                      <Zap className="w-4 h-4" />
+                      End Conversation & Run PAPI Profiling
+                    </motion.button>
+                  )}
+                  {isProfiling && (
+                    <div className="w-full text-center py-3 text-secondary font-mono text-xs uppercase tracking-widest animate-pulse">
+                      ⏳ Profiling in progress...
+                    </div>
+                  )}
+                  <div className="flex items-end gap-3">
+                    <textarea
+                      value={prompt}
+                      onChange={e => setPrompt(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(); } }}
+                      rows={1}
+                      className="flex-1 bg-surface-container-low border border-outline-variant/20 rounded-lg px-4 py-2.5 text-white font-mono text-sm focus:outline-none focus:border-primary/50 transition-colors resize-none"
+                      style={{ maxHeight: '120px', overflowY: 'auto' }}
+                      placeholder={!sessionId ? "Start a new conversation..." : "Continue the inference session..."}
+                      disabled={isRunning || isProfiling}
+                    />
+                    <motion.button
+                      whileHover={{ scale: 1.04 }}
+                      whileTap={{ scale: 0.96 }}
+                      onClick={onSend}
+                      disabled={!prompt.trim() || isRunning || isProfiling}
+                      className="bg-primary text-on-primary p-2.5 rounded-lg shadow-[0_0_16px_rgba(137,206,255,0.2)] disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none shrink-0"
+                    >
+                      <Send className="w-4 h-4" />
+                    </motion.button>
+                  </div>
                 </div>
               </motion.div>
             )}
@@ -328,10 +622,11 @@ export default function PromptsView() {
                   <span className="text-primary">{maxTokens}</span>
                 </div>
                 <input
-                  type="range" min={16} max={1056} step={16} value={maxTokens}
+                  type="range" min={1} max={10000} step={1} value={maxTokens}
                   onChange={e => set('maxTokens', Number(e.target.value))}
-                  className="param-slider w-full"
-                  style={{ background: `linear-gradient(to right, #89ceff ${(maxTokens - 16) / (1056 - 16) * 100}%, rgba(255,255,255,0.08) ${(maxTokens - 16) / (1056 - 16) * 100}%)` }}
+                  disabled={isLocked}
+                  className="param-slider w-full disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ background: `linear-gradient(to right, #89ceff ${(maxTokens - 1) / (10000 - 1) * 100}%, rgba(255,255,255,0.08) ${(maxTokens - 1) / (10000 - 1) * 100}%)` }}
                 />
               </div>
               <div className="space-y-3">
@@ -342,7 +637,8 @@ export default function PromptsView() {
                 <input
                     type="range" min={1} max={10} step={1} value={papiEventsPerRun}
                     onChange={e => set('papiEventsPerRun', Number(e.target.value))}
-                    className="param-slider w-full"
+                    disabled={isLocked}
+                    className="param-slider w-full disabled:opacity-50 disabled:cursor-not-allowed"
                     style={{ background: `linear-gradient(to right, #89ceff ${(papiEventsPerRun - 1) / (10 - 1) * 100}%, rgba(255,255,255,0.08) ${(papiEventsPerRun - 1) / (10 - 1) * 100}%)` }}
                 />
               </div>
@@ -353,22 +649,24 @@ export default function PromptsView() {
             <h3 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant mb-4">System Presets</h3>
             <div className="grid grid-cols-2 gap-3">
               <button
+                disabled={isLocked}
                 onClick={() => setSelectedPreset('general')}
                 className={`p-3 rounded border text-[10px] font-bold uppercase tracking-widest transition-all ${
                   selectedPreset === 'general'
                     ? 'bg-primary/10 border-primary/40 text-primary'
                     : 'bg-surface-container-low border-outline-variant/20 text-outline hover:text-primary hover:border-primary/50'
-                }`}
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
               >
                 General Preset
               </button>
               <button
+                disabled={isLocked}
                 onClick={() => setSelectedPreset('advanced')}
                 className={`p-3 rounded border text-[10px] font-bold uppercase tracking-widest transition-all ${
                   selectedPreset === 'advanced'
                     ? 'bg-primary/10 border-primary/40 text-primary'
                     : 'bg-surface-container-low border-outline-variant/20 text-outline hover:text-primary hover:border-primary/50'
-                }`}
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
               >
                 Advanced
               </button>
@@ -386,13 +684,35 @@ export default function PromptsView() {
               >
                 <div className="bg-surface-container p-6 rounded-xl border border-outline-variant/10">
                   <h3 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant mb-4">Available Papi Events</h3>
-                  <div className="space-y-2">
-                    {availableHooks.map(hook => (
-                      <div key={hook.id} className="flex items-center justify-between p-3 bg-surface-container-low border border-outline-variant/10 rounded hover:border-primary/30 transition-all">
-                        <span className="text-[10px] font-mono font-bold uppercase text-on-surface-variant">{hook.label}</span>
-                        <span className="text-[10px] font-mono text-outline">{hook.id}</span>
-                      </div>
-                    ))}
+                  <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+                    {availableHooks.map(hook => {
+                      const isSelected = selectedEvents.includes(hook.id);
+                      return (
+                        <div
+                          key={hook.id}
+                          onClick={() => {
+                            if (isLocked) return;
+                            setSelectedEvents(prev =>
+                              prev.includes(hook.id)
+                                ? prev.filter(id => id !== hook.id)
+                                : [...prev, hook.id]
+                            );
+                          }}
+                          className={`flex items-center justify-between p-3 rounded border transition-all cursor-pointer select-none ${
+                            isLocked ? 'opacity-60 cursor-not-allowed' : ''
+                          } ${
+                            isSelected
+                              ? 'bg-primary/10 border-primary/40 text-primary shadow-[0_0_12px_rgba(137,206,255,0.1)]'
+                              : 'bg-surface-container-low border-outline-variant/10 hover:border-primary/30 text-outline hover:text-primary'
+                          }`}
+                        >
+                          <span className={`text-[10px] font-mono font-bold uppercase ${isSelected ? 'text-primary' : 'text-on-surface-variant'}`}>
+                            {hook.label}
+                          </span>
+                          <span className="text-[10px] font-mono text-outline">{hook.id}</span>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </motion.section>
@@ -400,6 +720,101 @@ export default function PromptsView() {
           </AnimatePresence>
         </div>
       </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showProgressModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-md p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              transition={{ type: 'spring', duration: 0.5 }}
+              className="w-full max-w-2xl bg-surface-container border border-primary/20 rounded-2xl shadow-[0_0_50px_rgba(137,206,255,0.15)] overflow-hidden"
+            >
+              {/* Header */}
+              <div className="bg-surface-container-highest border-b border-outline-variant/10 px-6 py-4 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center animate-pulse">
+                  <Activity className="w-5 h-5 text-primary animate-spin" style={{ animationDuration: '3s' }} />
+                </div>
+                <div>
+                  <h3 className="font-headline font-bold text-base text-white">Hardware Profiling Active</h3>
+                  <p className="text-[10px] font-mono uppercase tracking-widest text-primary font-bold">PAPI Counter Acquisition Layer</p>
+                </div>
+              </div>
+
+              {/* Body */}
+              <div className="p-6 space-y-6">
+                {/* Active Step Indicator */}
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="font-mono text-outline font-bold uppercase tracking-wider">Active Stage</span>
+                    <span className="font-mono text-primary font-bold">{progressPercent}%</span>
+                  </div>
+                  <div className="font-headline text-lg text-white font-bold tracking-tight">
+                    {activeStep}
+                  </div>
+
+                  {/* Custom Progress Bar */}
+                  <div className="w-full h-2 bg-surface-container-highest rounded-full overflow-hidden relative border border-outline-variant/10">
+                    <motion.div
+                      initial={{ width: 0 }}
+                      animate={{ width: `${progressPercent}%` }}
+                      transition={{ duration: 0.3 }}
+                      className="h-full bg-gradient-to-r from-primary to-secondary rounded-full shadow-[0_0_12px_rgba(137,206,255,0.4)]"
+                    />
+                  </div>
+                </div>
+
+                {/* Subtitle / Explainer */}
+                <p className="text-xs text-on-surface-variant leading-relaxed">
+                  Executing sequential multibatch inference passes to sample event groups across multiple execution paths. Hardware counters are bound dynamically to isolate arithmetic intensity, data caching misses, and tensor compute ratios.
+                </p>
+
+                {/* Live Console Terminal */}
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-[10px] font-mono font-bold uppercase text-outline tracking-wider">
+                    <Terminal className="w-3.5 h-3.5 text-primary animate-pulse" />
+                    Real-time Telemetry Stream
+                  </div>
+                  <div className="h-48 bg-black/40 border border-outline-variant/15 rounded-lg p-4 font-mono text-xs text-on-surface overflow-y-auto space-y-1.5 scrollbar-thin select-text">
+                    {profilingLogs.length === 0 ? (
+                      <div className="text-outline italic animate-pulse">Waiting for telemetry logs...</div>
+                    ) : (
+                      profilingLogs.map((log, index) => {
+                        let textClass = "text-on-surface-variant";
+                        if (log.startsWith('=====') || log.startsWith('Running group')) {
+                          textClass = "text-primary font-bold";
+                        } else if (log.startsWith('Warning')) {
+                          textClass = "text-yellow-400";
+                        } else if (log.startsWith('Error')) {
+                          textClass = "text-error font-bold";
+                        }
+                        return (
+                          <div key={index} className={textClass}>
+                            {log}
+                          </div>
+                        );
+                      })
+                    )}
+                    <div ref={terminalBottomRef} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="bg-surface-container-highest border-t border-outline-variant/10 px-6 py-4 flex justify-between items-center text-[10px] font-mono text-outline">
+                <span>DO NOT NAVIGATE OR CLOSE BROWSER</span>
+                <span className="animate-pulse text-secondary">ACTIVE SAMPLING</span>
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>

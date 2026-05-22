@@ -98,7 +98,8 @@ def validate_run(event_group):
         return True, None
     
     # Parse which event caused the conflict
-    for line in result.stderr.splitlines():
+    error_output = (result.stderr or "") + (result.stdout or "")
+    for line in error_output.splitlines():
         if "cannot be added" in line or "conflict" in line.lower():
             for event in event_group:
                 if event in line:

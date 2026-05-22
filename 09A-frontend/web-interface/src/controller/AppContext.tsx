@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
 import {Model, PapiEvent} from '../types';
 
 export interface AppState {
@@ -356,14 +356,16 @@ const AppContext = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AppState>(defaultState);
 
-  const set = <K extends keyof AppState>(key: K, value: AppState[K]) => {
+  const set = useCallback(<K extends keyof AppState>(key: K, value: AppState[K]) => {
     setState(prev => ({ ...prev, [key]: value }));
-  };
+  }, []);
 
-  const reset = () => setState(defaultState);
+  const reset = useCallback(() => setState(defaultState), []);
+
+  const contextValue = useMemo(() => ({ state, set, reset }), [state, set, reset]);
 
   return (
-    <AppContext.Provider value={{ state, set, reset }}>
+    <AppContext.Provider value={contextValue}>
       {children}
     </AppContext.Provider>
   );

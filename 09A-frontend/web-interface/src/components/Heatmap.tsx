@@ -157,9 +157,9 @@ export default function Heatmap({ stages, tabs, title, description, cellSize = 4
             transition={{ duration: 0.25 }}
             className="overflow-hidden"
           >
-      <div className="mt-6 flex gap-3 justify-center">
+      <div className="mt-6 flex gap-3 overflow-hidden">
         {/* Y-axis labels */}
-        <div className="flex flex-col justify-around py-0.5" style={{ minWidth: '80px' }}>
+        <div className="flex flex-col py-0.5 border-r border-outline-variant/10 pr-2 gap-2" style={{ minWidth: '95px' }}>
           {rows.map((row, ri) => (
             <div
               key={row.label}
@@ -167,6 +167,7 @@ export default function Heatmap({ stages, tabs, title, description, cellSize = 4
               style={{
                 fontSize:    hoveredRow === ri ? '11px' : '9px',
                 color:       hoveredRow === ri ? '#fff' : '#88929b',
+                height:      `${cellSize}px`,
               }}
             >
               {row.label}
@@ -174,70 +175,83 @@ export default function Heatmap({ stages, tabs, title, description, cellSize = 4
           ))}
         </div>
 
-        {/* Cells */}
-        <div className="space-y-1">
-          {rows.map((row, ri) => (
-            <div
-              key={row.label}
-              className="grid gap-1"
-              style={{ gridTemplateColumns: colTemplate }}
-            >
-              {row.values.map((val, ci) => {
-                // `val` is always the normalised 0..1 value used for colour.
-                const v = Math.min(Math.max(val, 0), 1);
+        {/* Cells & X-axis scrollable view container */}
+        <div className="flex-1 overflow-x-auto scrollbar-thin pb-2">
+          <div className="space-y-2 min-w-max">
+            {rows.map((row, ri) => (
+              <div
+                key={row.label}
+                className="grid gap-2"
+                style={{ gridTemplateColumns: colTemplate }}
+              >
+                {row.values.map((val, ci) => {
+                  // `val` is always the normalised 0..1 value used for colour.
+                  const v = Math.min(Math.max(val, 0), 1);
 
-                // Raw value for the label (falls back to normalised if not supplied).
-                const rawVal = row.rawValues ? row.rawValues[ci] : val;
+                  // Raw value for the label (falls back to normalised if not supplied).
+                  const rawVal = row.rawValues ? row.rawValues[ci] : val;
 
-                // Label shown inside the cell.
-                // In 'raw' mode we need real rawValues to format meaningfully;
-                // rows that only have normalised values fall back to percent.
-                let cellLabel: string;
-                if (displayMode === 'raw') {
-                  cellLabel = row.rawValues ? (formatValue ? formatValue(rawVal) : rawVal.toFixed(1)) : '';
-                } else {
-                  const pct = Math.round(v * 100);
-                  cellLabel = pct > 0 ? `${pct}%` : '';
-                }
-                // In raw mode with real data always show the label even on near-black cells;
-                // in percent mode keep the threshold so empty (0%) cells stay clean.
-                const showLabel = cellLabel !== '' && (displayMode === 'raw' && row.rawValues ? true : v >= 0.02);
+                  // Label shown inside the cell.
+                  // In 'raw' mode we need real rawValues to format meaningfully;
+                  // rows that only have normalised values fall back to percent.
+                  let cellLabel: string;
+                  if (displayMode === 'raw') {
+                    cellLabel = row.rawValues ? (formatValue ? formatValue(rawVal) : rawVal.toFixed(1)) : '';
+                  } else {
+                    const pct = Math.round(v * 100);
+                    cellLabel = pct > 0 ? `${pct}%` : '';
+                  }
+                  // In raw mode with real data always show the label even on near-black cells;
+                  // in percent mode keep the threshold so empty (0%) cells stay clean.
+                  const showLabel = cellLabel !== '' && (displayMode === 'raw' && row.rawValues ? true : v >= 0.02);
 
-                return (
-                  <div
-                    key={ci}
-                    title={`${row.label} @ ${stages[ci]}: ${cellLabel || '0'}`}
-                    className="rounded-sm transition-all duration-150 cursor-default flex items-center justify-center"
-                    style={{
-                      background:  v < 0.02 ? `rgb(${stops[0].join(',')})` : heatColor(v),
-                      aspectRatio: '1',
-                    }}
-                    onMouseEnter={() => { setHoveredRow(ri); setHoveredCol(ci); }}
-                    onMouseLeave={() => { setHoveredRow(null); setHoveredCol(null); }}
-                  >
-                    {showLabel && (
-                      <span
-                        className="transition-all duration-150 select-none"
-                        style={{
-                          fontSize:   hoveredRow === ri && hoveredCol === ci ? '20px' : '14px',
-                          fontFamily: 'var(--font-mono)',
-                          fontWeight: 700,
-                          color:      '#fff',
-                          lineHeight: 1,
-                          textShadow: '0 0 3px rgba(0,0,0,0.9), 0 1px 2px rgba(0,0,0,0.8)',
-                        }}
-                      >
-                        {cellLabel}
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          ))}
+                  // Dynamically calculate readable font size that scales with cell size and label length
+                  const labelLen = cellLabel.length;
+                  const baseSize = cellSize * 0.28; // e.g. 40px cell -> 11.2px, 60px cell -> 16.8px
+                  const fontScale = labelLen > 5 ? 0.65 : labelLen > 4 ? 0.75 : labelLen > 3 ? 0.9 : 1.0;
+                  const calculatedSize = Math.max(Math.round(baseSize * fontScale), 8);
+                  const isHovered = hoveredRow === ri && hoveredCol === ci;
+                  const finalFontSize = isHovered ? Math.max(Math.round(calculatedSize * 1.35), 11) : calculatedSize;
 
-          {/* X-axis labels */}
-          <div className="grid mt-2 gap-1" style={{ gridTemplateColumns: colTemplate }}>
+                  return (
+                    <div
+                      key={ci}
+                      title={`${row.label} @ ${stages[ci]}: ${cellLabel || '0'}`}
+                      className="rounded-sm transition-all duration-150 cursor-default flex items-center justify-center overflow-hidden"
+                      style={{
+                        background:  v < 0.02 ? `rgb(${stops[0].join(',')})` : heatColor(v),
+                        aspectRatio: '1',
+                        width:       `${cellSize}px`,
+                        height:      `${cellSize}px`,
+                      }}
+                      onMouseEnter={() => { setHoveredRow(ri); setHoveredCol(ci); }}
+                      onMouseLeave={() => { setHoveredRow(null); setHoveredCol(null); }}
+                    >
+                      {showLabel && (
+                        <span
+                          className="transition-all duration-150 select-none text-center px-0.5 overflow-hidden text-ellipsis whitespace-nowrap"
+                          style={{
+                            fontSize:   `${finalFontSize}px`,
+                            letterSpacing: '-0.04em',
+                            fontFamily: 'var(--font-mono)',
+                            fontWeight: 700,
+                            color:      '#fff',
+                            lineHeight: 1.1,
+                            textShadow: '0 0 3px rgba(0,0,0,0.9), 0 1px 2px rgba(0,0,0,0.8)',
+                            maxWidth:   '94%',
+                          }}
+                        >
+                          {cellLabel}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+
+            {/* X-axis labels */}
+            <div className="grid mt-2 gap-2" style={{ gridTemplateColumns: colTemplate }}>
             {stages.map((s, ci) => (
               <div
                 key={s}
@@ -252,6 +266,7 @@ export default function Heatmap({ stages, tabs, title, description, cellSize = 4
             ))}
           </div>
         </div>
+      </div>
       </div>
 
       {/* Legend */}

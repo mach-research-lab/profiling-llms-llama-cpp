@@ -6,9 +6,9 @@ Provides API endpoints to list models and run profiling.
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
-import subprocess
+import subprocess, threading, uuid, asyncio
 import os
 import glob
 import json
@@ -31,10 +31,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
 LLAMA_ROOT = os.path.dirname(SCRIPT_DIR)
 BINARY = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
-MODELS_ROOT = os.path.join(os.path.expanduser("~"), "shared/models")
+MODELS_ROOT = os.path.join(LLAMA_ROOT, "models")
 PLOTS_DIR = os.path.join(SCRIPT_DIR, "plots")
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
@@ -94,52 +96,357 @@ async def get_events():
     ]
 
 
-@app.post("/profile")
-async def run_profile(request: ProfileRequest):
-    """Run PAPI profiling with selected parameters."""
+## --- Session store ---
+active_sessions: dict[str, dict] = {}
+# Each entry: { "proc": Popen|None, "queue": asyncio.Queue, "loop": loop, "cfg": Config, "papi_events_per_run": int|None }
 
-    # Check if binary exists
-    if not os.path.isfile(BINARY):
-        raise HTTPException(
-            status_code=404,
-            detail=f"Binary not found at {BINARY}. Please build llama-eval-callback first."
-        )
 
-    # Validate events (max 4)
-    if len(request.events) > 4:
-        raise HTTPException(status_code=400, detail="Maximum 4 events allowed")
+class RunStartRequest(BaseModel):
+    model_path: str
+    prompt: str
+    n_predict: int = 64
+    k_cache_type: str = "f16"
+    v_cache_type: str = "f16"
+    papi_events_per_run: int | None = None
+    custom_events: Optional[List[str]] = None
 
-    # Build command
-    events_arg = ",".join(request.events)
-    cmd = [
-        BINARY,
-        "--papi-events", events_arg,
-        "-m", request.model_path,
-        "-p", request.prompt,
-        "-n", str(request.n_predict),
-        "--log-disable",
-    ]
 
-    try:
-        # Run the profiling
-        result = subprocess.run(
-            cmd,
+class SendPromptRequest(BaseModel):
+    prompt: str
+
+
+@app.post("/run/start")
+async def start_run(request: RunStartRequest):
+    """Start ONLY the phase-view binary in conversation mode for interactive chat."""
+    session_id = str(uuid.uuid4())
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    from run_handler import Config, Run_type, LLAMA_ROOT as LR
+    from event_retriever import get_valid_runs_from_list
+
+    # Clean up any existing active sessions/processes first to free up PAPI/GPU
+    for old_sid, session in list(active_sessions.items()):
+        proc = session.get("proc")
+        if proc and proc.poll() is None:
+            print(f"[chat] Terminating orphaned process from session {old_sid}")
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.5)
+            except Exception as e:
+                print(f"[chat] Failed to terminate orphaned process: {e}")
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                old_loop = session.get("loop")
+                old_queue = session.get("queue")
+                if old_loop and old_queue:
+                    asyncio.run_coroutine_threadsafe(old_queue.put({"chat_done": True, "done": True}), old_loop)
+            except Exception:
+                pass
+            active_sessions.pop(old_sid, None)
+
+    model_path = request.model_path
+    if not os.path.isabs(model_path):
+        model_path = os.path.join(MODELS_ROOT, model_path)
+    if not os.path.isfile(model_path):
+        raise HTTPException(status_code=404, detail=f"Model not found at {model_path}.")
+
+    cfg = Config(
+        model_path=model_path,
+        custom_events=request.custom_events,
+        prompt=request.prompt,
+        n_predict=request.n_predict,
+        k_cache_type=request.k_cache_type,
+        v_cache_type=request.v_cache_type,
+        binary_path=os.path.join(LR, "build/bin/llama-measurement-phase-view"),
+    )
+
+    RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "run_every_view_results")
+    if os.path.exists(RESULTS_DIR):
+        import shutil
+        shutil.rmtree(RESULTS_DIR)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    result_path = os.path.join(RESULTS_DIR, Run_type.PHASE_VIEW.path)
+
+    active_sessions[session_id] = {
+        "proc": None, "queue": queue, "loop": loop,
+        "cfg": cfg, "papi_events_per_run": request.papi_events_per_run,
+    }
+
+    def chat_thread():
+        """Run the phase-view binary in conversation+collect-prompts mode."""
+        try:
+            events_list = request.custom_events if request.custom_events is not None else Run_type.PHASE_VIEW.events
+            event_groups = get_valid_runs_from_list(events_list, request.papi_events_per_run)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            asyncio.run_coroutine_threadsafe(queue.put({"error": str(e), "done": True}), loop)
+            return
+
+        # Only run the FIRST event group interactively (with --collect-prompts)
+        group = event_groups[0]
+        events_arg = ",".join(group)
+        cmd = [
+            cfg.binary_path,
+            "--papi-events", events_arg,
+            "--result-path", result_path,
+            "--papi-events-unrestricted",
+            "--conversation",
+            "-m", cfg.model_path,
+            "-p", cfg.prompt,
+            "-n", str(cfg.n_predict),
+            "--cache-type-k", cfg.k_cache_type,
+            "--cache-type-v", cfg.v_cache_type,
+            "--temp", "0",
+            "--log-disable",
+            "--collect-prompts",
+        ]
+
+        print(f"\n[chat] Running: {' '.join(cmd)}\n")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE, text=True, bufsize=1,
             cwd=LLAMA_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minute timeout
         )
+        active_sessions[session_id]["proc"] = proc
 
-        return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode
-        }
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=408, detail="Profiling timed out after 5 minutes")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        for line in iter(proc.stdout.readline, ""):
+            asyncio.run_coroutine_threadsafe(
+                queue.put({"line": line.rstrip()}), loop
+            )
+        proc.wait()
+
+        # Chat phase done
+        asyncio.run_coroutine_threadsafe(queue.put({"chat_done": True}), loop)
+
+    threading.Thread(target=chat_thread, daemon=True).start()
+    return {"sessionId": session_id}
+
+
+@app.get("/run/stream/{session_id}")
+async def stream_run(session_id: str):
+    """SSE endpoint — streams stdout lines for a session."""
+    session = active_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    queue = session["queue"]
+
+    async def event_generator():
+        while True:
+            msg = await queue.get()
+            yield f"data: {json.dumps(msg)}\n\n"
+            if msg.get("done") or msg.get("chat_done"):
+                break
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/run/cancel")
+async def cancel_runs():
+    """Cancel all active sessions and terminate their running processes."""
+    count = 0
+    for sid, session in list(active_sessions.items()):
+        proc = session.get("proc")
+        if proc and proc.poll() is None:
+            print(f"[chat] Cancelling active process for session {sid}")
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.5)
+            except Exception as e:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            count += 1
+        try:
+            loop = session.get("loop")
+            queue = session.get("queue")
+            if loop and queue:
+                asyncio.run_coroutine_threadsafe(queue.put({"chat_done": True, "done": True}), loop)
+        except Exception:
+            pass
+    active_sessions.clear()
+    return {"terminated_count": count}
+
+
+@app.post("/run/prompt/{session_id}")
+async def send_prompt(session_id: str, body: SendPromptRequest):
+    """Send a follow-up prompt to the running chat process via stdin."""
+    session = active_sessions.get(session_id)
+    if not session or not session.get("proc"):
+        raise HTTPException(status_code=404, detail="No active process for this session")
+    proc = session["proc"]
+    try:
+        proc.stdin.write(body.prompt + "\n")
+        proc.stdin.flush()
+    except BrokenPipeError:
+        raise HTTPException(status_code=410, detail="Process has already exited")
+    return {"ok": True}
+
+
+@app.post("/run/profile/{session_id}")
+async def run_profile(session_id: str):
+    """End the chat (send 'quit') and run remaining profiling views.
+    Returns a new SSE stream with profiling progress.
+    """
+    session = active_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Send quit to end the conversation
+    proc = session.get("proc")
+    if proc and proc.poll() is None:
+        try:
+            proc.stdin.write("quit\n")
+            proc.stdin.flush()
+        except BrokenPipeError:
+            pass
+
+    cfg = session["cfg"]
+    papi_events_per_run = session["papi_events_per_run"]
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    active_sessions[session_id]["queue"] = queue
+    active_sessions[session_id]["loop"] = loop
+
+    def profile_thread():
+        """Run remaining views (top, decoder-block, tensor-op) + roofline."""
+        # Wait for the interactive chat process to finish and write collected_prompts.json
+        proc = session.get("proc")
+        if proc and proc.poll() is None:
+            try:
+                proc.wait()
+            except Exception:
+                pass
+
+        import run_handler
+        from run_handler import Run_type
+        import event_retriever
+
+        # Save original builtins print and assign custom print to route python logs to SSE stream
+        original_print = print
+
+        def custom_print(*args, **kwargs):
+            sep = kwargs.get("sep", " ")
+            line = sep.join(str(arg) for arg in args)
+            original_print(*args, **kwargs)
+            for subline in line.split('\n'):
+                trimmed = subline.strip()
+                if trimmed:
+                    asyncio.run_coroutine_threadsafe(queue.put({"line": trimmed}), loop)
+
+        run_handler.print = custom_print
+        event_retriever.print = custom_print
+
+        RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "run_every_view_results")
+        original_run = subprocess.run
+        original_popen = subprocess.Popen
+
+        def patched_popen(cmd, **kwargs):
+            kwargs["stdout"] = subprocess.PIPE
+            kwargs["stderr"] = subprocess.STDOUT
+            kwargs["stdin"]  = subprocess.PIPE
+            kwargs["text"]   = True
+            kwargs["bufsize"] = 1
+            p = original_popen(cmd, **kwargs)
+            active_sessions.get(session_id, {})["proc"] = p
+            for line in iter(p.stdout.readline, ""):
+                asyncio.run_coroutine_threadsafe(queue.put({"line": line.rstrip()}), loop)
+            p.wait()
+            return p
+
+        def patched_run(cmd, **kwargs):
+            if kwargs.get("capture_output"):
+                return original_run(cmd, **kwargs)
+            p = patched_popen(cmd, cwd=kwargs.get("cwd", LLAMA_ROOT))
+            p.wait()
+            return p
+
+        run_handler.subprocess.run = patched_run
+
+        try:
+            # Also run remaining phase-view event groups (2nd, 3rd, etc.) with --user-prompts
+            from event_retriever import get_valid_runs_from_list
+            from run_handler import get_user_prompts
+            result_path_phase = os.path.join(RESULTS_DIR, Run_type.PHASE_VIEW.path)
+            events_list = cfg.custom_events if cfg.custom_events is not None else Run_type.PHASE_VIEW.events
+            event_groups = get_valid_runs_from_list(events_list, papi_events_per_run)
+            for i, group in enumerate(event_groups[1:], start=2):
+                asyncio.run_coroutine_threadsafe(
+                    queue.put({"line": f"===== Phase View group {i}/{len(event_groups)} ====="}), loop)
+                events_arg = ",".join(group)
+                cmd = [
+                    cfg.binary_path,
+                    "--papi-events", events_arg,
+                    "--result-path", result_path_phase,
+                    "--papi-events-unrestricted", "--conversation",
+                    "-m", cfg.model_path, "-p", cfg.prompt,
+                    "-n", str(cfg.n_predict),
+                    "--cache-type-k", cfg.k_cache_type, "--cache-type-v", cfg.v_cache_type,
+                    "--temp", "0", "--log-disable",
+                    "--user-prompts", get_user_prompts(result_path_phase), "--disable-prints",
+                ]
+                patched_run(cmd, cwd=LLAMA_ROOT)
+
+            asyncio.run_coroutine_threadsafe(
+                queue.put({"line": "===== Starting Top View ====="}), loop)
+            cfg.binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-top-view")
+            run_handler.run_view(cfg, False, Run_type.TOP_VIEW, False)
+
+            asyncio.run_coroutine_threadsafe(
+                queue.put({"line": "===== Starting Decoder Block View ====="}), loop)
+            cfg.binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-measurement-decoder-block-view")
+            run_handler.run_view(cfg, False, Run_type.DECODER_BLOCK_VIEW, False)
+
+            asyncio.run_coroutine_threadsafe(
+                queue.put({"line": "===== Starting Tensor-Op View ====="}), loop)
+            cfg.binary_path = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
+            run_handler.run_view(cfg, False, Run_type.TENSOR_OP_VIEW, False, papi_events_per_run)
+
+            try:
+                run_handler.complement_phase_json(
+                    os.path.join(RESULTS_DIR, Run_type.PHASE_VIEW.path),
+                    os.path.join(RESULTS_DIR, Run_type.TENSOR_OP_VIEW.path),
+                    None, os.path.join(RESULTS_DIR, Run_type.PHASE_VIEW.path))
+            except Exception as pe:
+                print(f"Warning: Failed to complement phase-view.json: {pe}")
+
+            try:
+                run_handler.complement_decoder_block_json(
+                    os.path.join(RESULTS_DIR, Run_type.DECODER_BLOCK_VIEW.path),
+                    os.path.join(RESULTS_DIR, Run_type.TENSOR_OP_VIEW.path),
+                    None, os.path.join(RESULTS_DIR, Run_type.DECODER_BLOCK_VIEW.path))
+            except Exception as de:
+                print(f"Warning: Failed to complement decoder-block-view.json: {de}")
+
+            try:
+                from Roofline import sum_blocks, roofline_from_aggregated, load_json, find_decoder_block_json
+                json_path = find_decoder_block_json()
+                if json_path:
+                    data = load_json(json_path)
+                    agg = sum_blocks(data)
+                    roofline_data = roofline_from_aggregated(agg, "Entire program")
+                    roofline_path = os.path.join(os.path.dirname(json_path), "roofline.json")
+                    with open(roofline_path, "w") as f:
+                        json.dump(roofline_data, f, indent=2)
+            except Exception as re:
+                print(f"Warning: Failed to generate roofline.json: {re}")
+
+            asyncio.run_coroutine_threadsafe(queue.put({"done": True}), loop)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            asyncio.run_coroutine_threadsafe(queue.put({"error": str(e), "done": True}), loop)
+        finally:
+            active_sessions.pop(session_id, None)
+
+    threading.Thread(target=profile_thread, daemon=True).start()
+    return {"ok": True}
 
 
 def parse_papi_output(output: str):
@@ -392,6 +699,47 @@ async def get_roofline_data():
     }
 
     return data
+
+
+RESULTS_DIR = os.path.join(LLAMA_ROOT, "run_every_view_results")
+
+@app.get("/top-view.json")
+async def get_top_view():
+    path = os.path.join(RESULTS_DIR, "top-view.json")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="top-view.json not found. Run profiling first.")
+    return FileResponse(path, media_type="application/json")
+
+@app.get("/phase-view.json")
+async def get_phase_view():
+    path = os.path.join(RESULTS_DIR, "phase-view.json")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="phase-view.json not found. Run profiling first.")
+    return FileResponse(path, media_type="application/json")
+
+@app.get("/decoder-block-view.json")
+async def get_decoder_block_view():
+    path = os.path.join(RESULTS_DIR, "decoder-block-view.json")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="decoder-block-view.json not found. Run profiling first.")
+    return FileResponse(path, media_type="application/json")
+
+@app.get("/roofline.json")
+async def get_roofline_json():
+    path = os.path.join(RESULTS_DIR, "roofline.json")
+    if not os.path.isfile(path):
+        from Roofline import sum_blocks, roofline_from_aggregated, load_json, find_decoder_block_json
+        json_path = find_decoder_block_json()
+        if json_path:
+            try:
+                data = load_json(json_path)
+                agg = sum_blocks(data)
+                roofline_data = roofline_from_aggregated(agg, "Entire program")
+                return roofline_data
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error generating roofline: {str(e)}")
+        raise HTTPException(status_code=404, detail="roofline.json not found. Run profiling first.")
+    return FileResponse(path, media_type="application/json")
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ from measurements_complementation import complement_phase_json, complement_decod
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 LLAMA_ROOT  = os.path.dirname(SCRIPT_DIR)
-MODELS_ROOT = os.path.join(os.path.expanduser("~"), "shared/models")
+MODELS_ROOT = os.path.join(LLAMA_ROOT, "models")
 OUTPUT_PATH = os.path.join(LLAMA_ROOT, "run_every_view_results")
 
 #Data class holding arguments
@@ -124,10 +124,15 @@ class Run_type(Enum):
 
 
 #Helper to read previous prompts from generated JSON
-def get_user_prompts(result_path: str) -> list[str]:
+def get_user_prompts(result_path: str, default_prompt: str = "hello") -> str:
     prompts_path = os.path.join(os.path.dirname(result_path), "collected_prompts.json")
-    with open(prompts_path) as f:
-        return json.dumps(json.load(f)["prompts"])
+    if not os.path.exists(prompts_path):
+        return json.dumps([default_prompt, "quit"])
+    try:
+        with open(prompts_path) as f:
+            return json.dumps(json.load(f)["prompts"])
+    except Exception:
+        return json.dumps([default_prompt, "quit"])
 
 
 #Function used to run specified view, is multibatch
@@ -175,7 +180,7 @@ def run_view(config: Config, clean_folder: bool, type: Run_type, gather_prompts,
             cmd.extend(["--collect-prompts"])
             
         else: 
-            cmd.extend(["--user-prompts", get_user_prompts(result_path),"--disable-prints"])
+            cmd.extend(["--user-prompts", get_user_prompts(result_path, config.prompt),"--disable-prints"])
             
         # Add database flags based on storage type
         if type == Run_type.TENSOR_OP_VIEW:
@@ -209,15 +214,20 @@ def run_every_view(config: Config, event_per_tensor: int | None):
     run_view(config, False, Run_type.TENSOR_OP_VIEW, False, event_per_tensor)
 
     #Complement JSON:s with additional fields
-    if config.custom_events is None:
+    try:
         complement_phase_json(os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path),
                               os.path.join(OUTPUT_PATH, Run_type.TENSOR_OP_VIEW.path),
                               None, os.path.join(OUTPUT_PATH, Run_type.PHASE_VIEW.path))
+    except Exception as pe:
+        print(f"Warning: Failed to complement phase-view.json: {pe}")
 
+    try:
         complement_decoder_block_json(os.path.join(OUTPUT_PATH, Run_type.DECODER_BLOCK_VIEW.path),
                                   os.path.join(OUTPUT_PATH, Run_type.TENSOR_OP_VIEW.path),
                                   None,
                                   os.path.join(OUTPUT_PATH, Run_type.DECODER_BLOCK_VIEW.path))
+    except Exception as de:
+        print(f"Warning: Failed to complement decoder-block-view.json: {de}")
     
 
 """
