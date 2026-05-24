@@ -19,6 +19,16 @@ matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 from analysis import plot_roofline, HARDWARE
 from event_retriever import get_available_events
+from heatmap import (
+    build_heatmap_matrix, 
+    load_measurements_from_sqlite_db,
+    normalize_measurements,
+    matrix_to_layer_heatmap_json,
+)
+from Roofline_api import (
+    find_decoder_block_json, load_json, sum_blocks, roofline_from_aggregated,
+    get_hardware as _rf_get_hardware,
+)
 
 app = FastAPI()
 
@@ -58,6 +68,13 @@ class AnalysisRequest(BaseModel):
     profiling_output: str
     hardware: str = "i7-1185G7"
     style: str = "academic"
+
+
+class HeatmapRequest(BaseModel):
+    heatmap_kind: str = "time"
+    phases: Optional[List[str]] = None
+    top_n: Optional[int] = 20
+    include_special_layers: bool = False
 
 
 def find_models():
@@ -425,18 +442,41 @@ async def run_profile(session_id: str):
             except Exception as de:
                 print(f"Warning: Failed to complement decoder-block-view.json: {de}")
 
+            
             try:
-                from Roofline import sum_blocks, roofline_from_aggregated, load_json, find_decoder_block_json
-                json_path = find_decoder_block_json()
-                if json_path:
-                    data = load_json(json_path)
-                    agg = sum_blocks(data)
-                    roofline_data = roofline_from_aggregated(agg, "Entire program")
-                    roofline_path = os.path.join(os.path.dirname(json_path), "roofline.json")
-                    with open(roofline_path, "w") as f:
-                        json.dump(roofline_data, f, indent=2)
+                asyncio.run_coroutine_threadsafe(
+                    queue.put({"line": "===== Generating Roofline Data ====="}), loop)
+                decoder_path = os.path.join(RESULTS_DIR, "decoder-block-view.json")
+                if os.path.isfile(decoder_path):
+                    data = load_json(decoder_path)
+                    # All blocks combined
+                    agg_all = sum_blocks(data)
+                    roofline_all_data = roofline_from_aggregated(agg_all, "Entire program")
+                    with open(os.path.join(RESULTS_DIR, "roofline.json"), "w") as f:
+                        json.dump(roofline_all_data, f, indent=2)
+                    # Prefill blocks
+                    prefill_blocks = [b for b in data if b.get("block_type") == "Prefill"]
+                    if prefill_blocks:
+                        agg_prefill = sum_blocks(prefill_blocks)
+                        roofline_prefill_data = roofline_from_aggregated(agg_prefill, "Entire Prefill")
+                        with open(os.path.join(RESULTS_DIR, "roofline-prefill.json"), "w") as f:
+                            json.dump(roofline_prefill_data, f, indent=2)
+                    # Decode blocks
+                    decode_blocks = [b for b in data if b.get("block_type") == "Decode"]
+                    if decode_blocks:
+                        agg_decode = sum_blocks(decode_blocks)
+                        roofline_decode_data = roofline_from_aggregated(agg_decode, "Entire Decode")
+                        with open(os.path.join(RESULTS_DIR, "roofline-decode.json"), "w") as f:
+                            json.dump(roofline_decode_data, f, indent=2)
+                    asyncio.run_coroutine_threadsafe(
+                        queue.put({"line": "Roofline data generated successfully"}), loop)
+                else:
+                    asyncio.run_coroutine_threadsafe(
+                        queue.put({"line": "Warning: decoder-block-view.json not found, skipping roofline"}), loop)
             except Exception as re:
-                print(f"Warning: Failed to generate roofline.json: {re}")
+                print(f"Warning: Failed to generate roofline data: {re}")
+                asyncio.run_coroutine_threadsafe(
+                    queue.put({"line": f"Warning: Roofline generation failed: {re}"}), loop)
 
             asyncio.run_coroutine_threadsafe(queue.put({"done": True}), loop)
         except Exception as e:
@@ -724,22 +764,227 @@ async def get_decoder_block_view():
         raise HTTPException(status_code=404, detail="decoder-block-view.json not found. Run profiling first.")
     return FileResponse(path, media_type="application/json")
 
-@app.get("/roofline.json")
-async def get_roofline_json():
+@app.get("/roofline/all")
+async def get_roofline_all():
     path = os.path.join(RESULTS_DIR, "roofline.json")
     if not os.path.isfile(path):
-        from Roofline import sum_blocks, roofline_from_aggregated, load_json, find_decoder_block_json
-        json_path = find_decoder_block_json()
-        if json_path:
+        raise HTTPException(status_code=404, detail="No roofline data. Run profiling first.")
+    with open(path) as f:
+        return json.load(f)
+
+@app.get("/roofline/prefill")
+async def get_roofline_prefill():
+    path = os.path.join(RESULTS_DIR, "roofline-prefill.json")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="No prefill roofline data. Run profiling first.")
+    with open(path) as f:
+        return json.load(f)
+
+@app.get("/roofline/decode")
+async def get_roofline_decode():
+    path = os.path.join(RESULTS_DIR, "roofline-decode.json")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="No decode roofline data. Run profiling first.")
+    with open(path) as f:
+        return json.load(f)
+
+@app.get("/roofline/prefill/{block_id}")
+async def get_roofline_prefill_block(block_id: int):
+    decoder_path = os.path.join(RESULTS_DIR, "decoder-block-view.json")
+    if not os.path.isfile(decoder_path):
+        raise HTTPException(status_code=404, detail="No profiling data. Run profiling first.")
+    data = load_json(decoder_path)
+    block = next((b for b in data if b.get("block_type") == "Prefill" and b.get("block_id") == block_id), None)
+    if not block:
+        available = [b["block_id"] for b in data if b.get("block_type") == "Prefill"]
+        raise HTTPException(status_code=404, detail=f"Prefill block {block_id} not found. Available: {available}")
+    agg = {"total_flops": block["FLOPs"], "dram_bytes": block["bytes_moved"], "time_seconds": block["runtime_ns"] / 1e9}
+    return roofline_from_aggregated(agg, f"Prefill block {block_id}")
+
+@app.get("/roofline/decode/{block_id}")
+async def get_roofline_decode_block(block_id: int):
+    decoder_path = os.path.join(RESULTS_DIR, "decoder-block-view.json")
+    if not os.path.isfile(decoder_path):
+        raise HTTPException(status_code=404, detail="No profiling data. Run profiling first.")
+    data = load_json(decoder_path)
+    block = next((b for b in data if b.get("block_type") == "Decode" and b.get("block_id") == block_id), None)
+    if not block:
+        available = [b["block_id"] for b in data if b.get("block_type") == "Decode"]
+        raise HTTPException(status_code=404, detail=f"Decode block {block_id} not found. Available: {available}")
+    agg = {"total_flops": block["FLOPs"], "dram_bytes": block["bytes_moved"], "time_seconds": block["runtime_ns"] / 1e9}
+    return roofline_from_aggregated(agg, f"Decode block {block_id}")
+
+@app.get("/phases")
+async def get_phases():
+    decoder_path = os.path.join(RESULTS_DIR, "decoder-block-view.json")
+    if not os.path.isfile(decoder_path):
+        raise HTTPException(status_code=404, detail="No profiling data. Run profiling first.")
+    data = load_json(decoder_path)
+    return {
+        "prefill_blocks": [b["block_id"] for b in data if b.get("block_type") == "Prefill"],
+        "decode_blocks":  [b["block_id"] for b in data if b.get("block_type") == "Decode"],
+    }
+
+
+def convert_matrix_to_heatmap_tab(matrix, label: str):
+    """Convert pandas DataFrame matrix to HeatmapTab format for React."""
+    if matrix.empty:
+        return {"label": label, "rows": []}
+    
+    # Find min/max for normalization
+    import numpy as np
+    all_values = matrix.values.flatten()
+    all_values = all_values[~np.isnan(all_values)]
+    
+    if len(all_values) == 0:
+        min_val, max_val = 0, 1
+    else:
+        min_val = float(np.min(all_values))
+        max_val = float(np.max(all_values))
+    
+    range_val = max_val - min_val if max_val > min_val else 1.0
+    
+    rows = []
+    for op_type in matrix.index:
+        row_values = matrix.loc[op_type].values
+        
+        # Normalize to 0..1
+        normalized = []
+        raw_vals = []
+        for v in row_values:
+            raw_vals.append(float(v) if not np.isnan(v) else 0.0)
+            if np.isnan(v):
+                normalized.append(0.0)
+            else:
+                norm = (float(v) - min_val) / range_val if range_val > 0 else 0.0
+                normalized.append(max(0.0, min(1.0, norm)))
+        
+        rows.append({
+            "label": str(op_type),
+            "values": normalized,
+            "rawValues": raw_vals
+        })
+    
+    return {
+        "label": label,
+        "rows": rows
+    }
+
+
+@app.post("/api/heatmap")
+async def get_heatmap(request: HeatmapRequest):
+    """Generate heatmap data from profiling results."""
+    try:
+        db_path = os.path.join(RESULTS_DIR, "tensor_op_view.db")
+        
+        # Load measurements from database or fallback to empty
+        if os.path.isfile(db_path):
             try:
-                data = load_json(json_path)
-                agg = sum_blocks(data)
-                roofline_data = roofline_from_aggregated(agg, "Entire program")
-                return roofline_data
+                df = load_measurements_from_sqlite_db(db_path)
+                df = normalize_measurements(df)
             except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Error generating roofline: {str(e)}")
-        raise HTTPException(status_code=404, detail="roofline.json not found. Run profiling first.")
-    return FileResponse(path, media_type="application/json")
+                print(f"Warning: Failed to load from database: {e}")
+                raise HTTPException(
+                    status_code=404, 
+                    detail="No profiling data available. Run profiling first."
+                )
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail="No profiling data available. Run profiling first."
+            )
+        
+        # Generate heatmap matrix
+        matrix, title, xlabel, value_label = build_heatmap_matrix(
+            df,
+            heatmap_kind=request.heatmap_kind,
+            phases=request.phases,
+            top_n=request.top_n,
+            include_special_layers=request.include_special_layers,
+        )
+        
+        # Convert to React format
+        tab = convert_matrix_to_heatmap_tab(matrix, request.heatmap_kind.upper())
+        
+        return {
+            "title": title,
+            "xlabel": xlabel,
+            "valueLabel": value_label,
+            "tabs": [tab],
+            "stages": [str(col) for col in matrix.columns],
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error generating heatmap: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating heatmap: {str(e)}"
+        )
+
+
+@app.post("/api/layer_heatmap")
+async def get_layer_heatmap(request: HeatmapRequest):
+    """Generate layer heatmap data in JSON schema format."""
+    try:
+        db_path = os.path.join(RESULTS_DIR, "tensor_op_view.db")
+        
+        # Load measurements from database
+        if os.path.isfile(db_path):
+            try:
+                df = load_measurements_from_sqlite_db(db_path)
+                df = normalize_measurements(df)
+            except Exception as e:
+                print(f"Warning: Failed to load from database: {e}")
+                raise HTTPException(
+                    status_code=404, 
+                    detail="No profiling data available. Run profiling first."
+                )
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail="No profiling data available. Run profiling first."
+            )
+        
+        # Generate heatmap matrix
+        matrix, title, xlabel, value_label = build_heatmap_matrix(
+            df,
+            heatmap_kind=request.heatmap_kind,
+            phases=request.phases,
+            top_n=request.top_n,
+            include_special_layers=request.include_special_layers,
+        )
+        
+        # Convert to layer heatmap JSON schema format
+        heatmap_json = matrix_to_layer_heatmap_json(
+            matrix,
+            heatmap_kind=request.heatmap_kind,
+            title=title,
+            x_label=xlabel,
+            value_label=value_label,
+        )
+        
+        return heatmap_json
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error generating layer heatmap: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating layer heatmap: {str(e)}"
+        )
+
+
+@app.post("/layer_heatmap", include_in_schema=False)
+async def get_layer_heatmap_alias(request: HeatmapRequest):
+    """Alias endpoint for backward compatibility."""
+    return await get_layer_heatmap(request)
 
 
 if __name__ == "__main__":

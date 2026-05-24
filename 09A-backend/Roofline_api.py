@@ -371,7 +371,7 @@ def phases():
 
 @app.get("/roofline/all")
 def roofline_all():
-    """Entire program (prefill + decode combined) from JSON."""
+    """Entire program (prefill + decode combined) from JSON."""        
     json_path = find_decoder_block_json()
     if not json_path:
         raise HTTPException(status_code=404, detail="decoder-block-view.json not found.")

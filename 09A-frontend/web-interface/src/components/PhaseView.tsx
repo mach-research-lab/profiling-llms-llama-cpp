@@ -10,11 +10,7 @@ import { motion } from 'motion/react';
 import { useAppState } from '@/src/controller/AppContext.tsx';
 import { fmt, fmtSI } from '@/src/controller/Controller.tsx';
 import Heatmap from '@/src/components/Heatmap.tsx';
-
-// TODO: Tokenization, Sampling eventuellt
-
-// TODO: Heatmap component that takes in a massive matrix
-  // TODO: (Tiles)
+import RooflineChart from '@/src/components/RooflineChart';
 
 export default function PhaseView() {
   const { state } = useAppState();
@@ -22,69 +18,41 @@ export default function PhaseView() {
     latencyS, tokensPerSecond,
     prefillTimeS, prefillTimePercent, prefillFLOPs, prefillFlopsTrendPct,
     prefillIntensity, prefillBytesMoved, prefillIPC, prefillEnergyJ,
-    prefillHitRate, prefillMatmulPct,
+    prefillHitRate, prefillMatmulPct, prefillOpTypeShare,
+    prefillCoreUtilPercent, prefillCoreThreads, prefillEnergyCoresJ, prefillEnergyPkgJ, prefillEnergyPsysJ, prefillAvgPowerPkgW,
     decodeTimeS, decodeTimePercent, decodeFLOPs, decodeFlopsTrendPct,
     decodeIntensity, decodeBytesMoved, decodeIPC, decodeEnergyJ,
-    decodeHitRate, decodeMatmulPct,
-    decimalPrecision, decoderBlockList,
+    decodeHitRate, decodeMatmulPct, decodeOpTypeShare,
+    decodeCoreUtilPercent, decodeCoreThreads, decodeEnergyCoresJ, decodeEnergyPkgJ, decodeEnergyPsysJ, decodeAvgPowerPkgW,
+    decimalPrecision, prefillRooflineOI, prefillRooflineAchievedGFLOPS,
+    decodeRooflineOI, decodeRooflineAchievedGFLOPS,
   } = state;
 
-  // ── Block-driven heatmap ───────────────────────────────────────────────────
-  const decodeBlocks = decoderBlockList.filter((b: any) => b.block_type === 'Decode');
-  const blockStages  = decodeBlocks.map((b: any) => `B${b.block_id}`);
+  const LAYER_HEATMAP_OPTIONS = [
+    { label: 'Time Heatmap', value: 'time' },
+    { label: 'Memory Heatmap', value: 'memory' },
+    { label: 'IPC Heatmap', value: 'ipc' },
+  ];
 
-  function norm(arr: number[]): number[] {
-    const max = Math.max(...arr, 1e-9);
-    return arr.map(v => v / max);
-  }
+  const PHASE_HEATMAP_TYPES = [
+    { label: 'Phase Runtime', value: 'op-share' },
+    { label: 'Phase Memory', value: 'op-share-memory' },
+    { label: 'Phase IPC', value: 'op-share-ipc' },
+  ];
 
-  // Raw values per row (used for cell labels in raw display mode)
-  const rawMatMul     = decodeBlocks.map((b: any) => (b.subcomponents?.attention?.FLOPs ?? 0) + (b.subcomponents?.MLP?.FLOPs ?? 0));
-  const rawSoftmax    = decodeBlocks.map((b: any) => b.subcomponents?.attention?.FLOPs ?? 0);
-  const rawKvCache    = decodeBlocks.map((b: any) => b.subcomponents?.attention?.bytes_moved ?? 0);
-  const rawActivation = decodeBlocks.map((b: any) => b.subcomponents?.MLP?.FLOPs ?? 0);
-  const rawResidual   = decodeBlocks.map((b: any) => b.runtime_ms ?? 0);
+  const [selectedLayerHeatmap, setSelectedLayerHeatmap] = React.useState('time');
 
-  // Fake quantitative values for ops without real profiling data yet
-  const fakeRope      = decodeBlocks.map((_: any, i: number) => 1.2e6 + i * 8e3);
-  const fakeLayerNorm = decodeBlocks.map((_: any, i: number) => 0.9e6 + i * 5e3);
-
-  // Normalise each column across all blocks individually to preserve relative hotspot colors
-  const normMatMul     = norm(rawMatMul);
-  const normRope        = norm(fakeRope);
-  const normSoftmax     = norm(rawSoftmax);
-  const normKvCache     = norm(rawKvCache);
-  const normActivation  = norm(rawActivation);
-  const normLayerNorm   = norm(fakeLayerNorm);
-  const normResidual    = norm(rawResidual);
-
-  const OP_COLUMNS = ['MAT_MUL', 'ROPE', 'SOFTMAX', 'KV_CACHE', 'ACTIVATION', 'LAYER_NORM', 'RESIDUAL'];
-
-  const blockOpRowsInverted = decodeBlocks.length > 0 ? decodeBlocks.map((b: any, i: number) => {
-    const label = `B${i}`;
-    const values = [
-      normMatMul[i],
-      normRope[i],
-      normSoftmax[i],
-      normKvCache[i],
-      normActivation[i],
-      normLayerNorm[i],
-      normResidual[i]
-    ];
-    const rawValues = [
-      rawMatMul[i],
-      fakeRope[i],
-      rawSoftmax[i],
-      rawKvCache[i],
-      rawActivation[i],
-      fakeLayerNorm[i],
-      rawResidual[i]
-    ];
-    return { label, values, rawValues };
-  }) : [];
   const f = (n: number) => fmt(n, decimalPrecision);
   const si = (n: number, unit: string) => fmtSI(n, unit, decimalPrecision);
   const trend = (pct: number) => `${pct >= 0 ? '↑' : '↓'} ${Math.abs(pct)}%`;
+
+  // Determine standard metric formatting suffixes for values depending on selection state
+  const getFormatFn = (kind: string) => {
+    if (kind.includes('time'))   return (v: number) => fmtSI(v, 'us', decimalPrecision);
+    if (kind.includes('memory')) return (v: number) => fmtSI(v, 'B', decimalPrecision);
+    if (kind.includes('ipc'))    return (v: number) => fmt(v, decimalPrecision);
+    return (v: number) => fmtSI(v, '', decimalPrecision);
+  };
 
   return (
     <div className="p-8 space-y-8 animate-in fade-in duration-500">
@@ -92,15 +60,8 @@ export default function PhaseView() {
       <div className="flex justify-between items-end mb-8">
         <div>
           <h2 className="font-headline text-3xl font-light text-primary mb-1">Phase Comparative Analytics</h2>
-          <p className="text-on-surface-variant font-mono text-xs uppercase tracking-widest">
-            Inference Session: <span className="text-secondary">#0988-X-OMEGA</span>
-          </p>
         </div>
         <div className="flex gap-4">
-          <div className="bg-surface-container p-3 rounded-lg border-l-2 border-tertiary">
-            <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Total Latency</div>
-            <div className="text-xl font-headline font-bold text-tertiary">{si(latencyS, 's')}</div>
-          </div>
           <div className="bg-surface-container p-3 rounded-lg border-l-2 border-secondary">
             <div className="text-[10px] text-on-surface-variant mb-1 uppercase tracking-tighter font-bold">Throughput</div>
             <div className="text-xl font-headline font-bold text-secondary">{f(tokensPerSecond)} tok/s</div>
@@ -114,157 +75,152 @@ export default function PhaseView() {
         <PhaseSection
           title="PHASE 01: PREFILL"
           icon={<Zap className="w-5 h-5 text-primary fill-current" />}
-          badge="COMPUTE BOUND"
-          badgeColor="text-primary bg-primary/10 border-primary/30"
           time={si(prefillTimeS, 's')}
           timePercent={prefillTimePercent}
           f={f}
           flops={si(prefillFLOPs, 'FLOPs')}
+          flopsNum={prefillFLOPs}
           flopsTrend={trend(prefillFlopsTrendPct)}
           intensity={`${f(prefillIntensity)} FLOPs/Byte`}
+          intensityNum={prefillIntensity}
           intensityPoint={{ x: 280, y: 80 }}
           bytesMoved={si(prefillBytesMoved, 'B')}
           ipc={f(prefillIPC)}
           energy={si(prefillEnergyJ, 'J')}
           hitRate={prefillHitRate}
           matmul={prefillMatmulPct}
+          opShare={prefillOpTypeShare}
+          coreUtilization={prefillCoreUtilPercent}
+          coreThreads={prefillCoreThreads}
+          energyCores={prefillEnergyCoresJ}
+          energyPkg={prefillEnergyPkgJ}
+          energyPsys={prefillEnergyPsysJ}
+          avgPowerPkgW={prefillAvgPowerPkgW}
           primaryColor="bg-primary"
+          rooflineOI={prefillRooflineOI}
+          rooflineAchievedGFLOPS={prefillRooflineAchievedGFLOPS}
         />
 
         {/* DECODE PHASE */}
         <PhaseSection 
           title="PHASE 02: DECODE" 
           icon={<RefreshCw className="w-5 h-5 text-secondary" />}
-          badge="MEMORY BOUND"
-          badgeColor="text-secondary bg-secondary/10 border-secondary/30"
           time={si(decodeTimeS, 's')}
           timePercent={decodeTimePercent}
           f={f}
           flops={si(decodeFLOPs, 'FLOPs')}
+          flopsNum={decodeFLOPs}
           flopsTrend={trend(decodeFlopsTrendPct)}
           intensity={`${f(decodeIntensity)} FLOPs/Byte`}
+          intensityNum={decodeIntensity}
           intensityPoint={{ x: 20, y: 144 }}
           bytesMoved={si(decodeBytesMoved, 'B')}
           ipc={f(decodeIPC)}
           energy={si(decodeEnergyJ, 'J')}
           hitRate={decodeHitRate}
           matmul={decodeMatmulPct}
+          opShare={decodeOpTypeShare}
+          coreUtilization={decodeCoreUtilPercent}
+          coreThreads={decodeCoreThreads}
+          energyCores={decodeEnergyCoresJ}
+          energyPkg={decodeEnergyPkgJ}
+          energyPsys={decodeEnergyPsysJ}
+          avgPowerPkgW={decodeAvgPowerPkgW}
           primaryColor="bg-secondary"
           isWarning
+          rooflineOI={decodeRooflineOI}
+          rooflineAchievedGFLOPS={decodeRooflineAchievedGFLOPS}
         />
       </div>
 
-      {/* Operation Heatmap — inverted block × op grid layout */}
-      <Heatmap
-        title="Operation Intensity per Decode Block"
-        description="Decode block (Y) × Operation (X) — raw FLOPs / bytes / ms"
-        stages={OP_COLUMNS}
-        cellSize={45}
-        displayMode="raw"
-        formatValue={v => fmtSI(v, '', decimalPrecision)}
-        tabs={blockOpRowsInverted.length > 0
-          ? [{ label: 'Decode', rows: blockOpRowsInverted }]
-          : [{ label: 'Decode', rows: [{ label: 'B0', values: [] }] }]
-        }
-      />
+      <div className="space-y-6">
+        {/* Layer Matrices Module */}
+        <div className="bg-surface-container p-6 rounded-lg border border-outline-variant/10">
+          <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 mb-6">
+            <div>
+              <h3 className="text-sm font-bold uppercase tracking-widest text-on-surface-variant">Layer Heatmaps</h3>
+              <p className="text-[10px] text-outline mt-2">Show runtime, memory, or IPC intensity across transformer layers.</p>
+            </div>
+            <label className="block text-sm">
+              <span className="text-[10px] uppercase tracking-widest text-on-surface-variant">Heatmap type</span>
+              <select
+                value={selectedLayerHeatmap}
+                onChange={e => setSelectedLayerHeatmap(e.target.value)}
+                className="mt-2 w-full rounded-lg border border-outline/30 bg-surface-container p-2 text-sm text-on-surface"
+              >
+                {LAYER_HEATMAP_OPTIONS.map(option => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+          </div>
 
-      {/* Cache Miss Rate Heatmap */}
-      <Heatmap
-        title="L3 Cache Miss Rate Heatmap"
-        description="Cache level (Y) × Transformer layer stage (X)"
-        stages={OP_STAGES}
-        cellSize={40}
-        defaultCollapsed
-        tabs={[
-          {
-            label: 'Prefill',
-            rows: CACHE_ROWS.map(r => ({ label: r.label, values: r.prefill })),
-          },
-          {
-            label: 'Decode',
-            rows: CACHE_ROWS.map(r => ({ label: r.label, values: r.decode })),
-          },
-        ]}
-      />
+          <Heatmap
+            title={`${selectedLayerHeatmap.toUpperCase()} PROFILE MAP`}
+            description="Operation type (Y) × Layer stage (X)"
+            stages={[]}
+            cellSize={40}
+            displayMode="raw"
+            autoFetch={true}
+            useLayerHeatmapEndpoint={true}
+            heatmapKind={selectedLayerHeatmap}
+            fetchTopN={20}
+            formatValue={getFormatFn(selectedLayerHeatmap)}
+            tabs={[]}
+          />
+        </div>
 
-      {/* Memory Bandwidth Heatmap */}
-      <Heatmap
-        title="IPC Heatmap"
-        description="Data source (Y) × Transformer layer stage (X)"
-        stages={OP_STAGES}
-        cellSize={40}
-        defaultCollapsed
-        tabs={[
-          {
-            label: 'Prefill',
-            rows: MEMBW_ROWS.map(r => ({ label: r.label, values: r.prefill })),
-          },
-          {
-            label: 'Decode',
-            rows: MEMBW_ROWS.map(r => ({ label: r.label, values: r.decode })),
-          },
-        ]}
-      />
+        {/* Phase Comparison Metrics Grid Module */}
+        <div className="bg-surface-container p-6 rounded-lg border border-outline-variant/10">
+          <div className="mb-6">
+            <h3 className="text-sm font-bold uppercase tracking-widest text-on-surface-variant">Phase Compare Heatmaps</h3>
+            <p className="text-[10px] text-outline mt-2">Compare runtime, memory, and IPC across prefill and decode phases.</p>
+          </div>
 
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            {PHASE_HEATMAP_TYPES.map(type => (
+              <div key={type.value} className="rounded-lg p-0">
+                <h4 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant mb-3">{type.label}</h4>
+                <Heatmap
+                  title={type.label}
+                  description=""
+                  stages={[]}
+                  cellSize={36}
+                  displayMode="raw"
+                  autoFetch={true}
+                  useLayerHeatmapEndpoint={true}
+                  heatmapKind={type.value}
+                  fetchTopN={15}
+                  formatValue={getFormatFn(type.value)}
+                  tabs={[]}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
 
-// ─── Heatmap data for the operation × layer-stage view ────────────────────────
-
-const OP_STAGES = [
-  'Q_PROJ', 'K_PROJ', 'V_PROJ', 'ROPE',
-  'QK_MATMUL', 'SOFTMAX', 'AV_MATMUL', 'O_PROJ',
-  'FFN_GATE', 'FFN_ACT', 'FFN_DOWN', 'LAYER_NORM',
-];
-
-const OP_ROWS: { label: string; prefill: number[]; decode: number[] }[] = [
-  { label: 'MAT_MUL',    prefill: [0.95, 0.90, 0.90, 0.00, 0.82, 0.00, 0.85, 0.92, 0.88, 0.00, 0.93, 0.00], decode: [0.55, 0.52, 0.52, 0.00, 0.30, 0.00, 0.32, 0.54, 0.50, 0.00, 0.55, 0.00] },
-  { label: 'ROPE',       prefill: [0.00, 0.00, 0.00, 0.95, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00], decode: [0.00, 0.00, 0.00, 0.90, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00] },
-  { label: 'SOFTMAX',    prefill: [0.00, 0.00, 0.00, 0.00, 0.00, 0.88, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00], decode: [0.00, 0.00, 0.00, 0.00, 0.00, 0.72, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00] },
-  { label: 'KV_CACHE',   prefill: [0.00, 0.55, 0.55, 0.00, 0.40, 0.00, 0.50, 0.00, 0.00, 0.00, 0.00, 0.00], decode: [0.00, 0.85, 0.85, 0.00, 0.78, 0.00, 0.80, 0.00, 0.00, 0.00, 0.00, 0.00] },
-  { label: 'ACTIVATION', prefill: [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.82, 0.00, 0.00], decode: [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.78, 0.00, 0.00] },
-  { label: 'LAYER_NORM', prefill: [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.92], decode: [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.88] },
-  { label: 'RESIDUAL',   prefill: [0.18, 0.18, 0.18, 0.12, 0.12, 0.12, 0.18, 0.22, 0.16, 0.12, 0.22, 0.28], decode: [0.22, 0.22, 0.22, 0.16, 0.16, 0.16, 0.22, 0.28, 0.20, 0.16, 0.28, 0.34] },
-];
-
-// ─── Cache miss rate × layer stage ────────────────────────────────────────────
-//     Values represent miss rate 0..1 per cache level per stage
-
-const CACHE_ROWS: { label: string; prefill: number[]; decode: number[] }[] = [
-  // L1 misses — high during weight loads (projections, FFN), low elsewhere
-  { label: 'L1_MISS', prefill: [0.72, 0.68, 0.68, 0.12, 0.55, 0.10, 0.58, 0.70, 0.65, 0.08, 0.74, 0.15], decode: [0.45, 0.42, 0.42, 0.10, 0.62, 0.12, 0.65, 0.44, 0.40, 0.06, 0.46, 0.12] },
-  // L2 misses — spill from L1, especially bad in FFN and KV stages
-  { label: 'L2_MISS', prefill: [0.48, 0.52, 0.52, 0.08, 0.44, 0.07, 0.46, 0.50, 0.60, 0.05, 0.62, 0.10], decode: [0.60, 0.65, 0.65, 0.10, 0.72, 0.09, 0.74, 0.61, 0.55, 0.06, 0.58, 0.11] },
-  // L3 misses — worst in decode (KV cache thrashing)
-  { label: 'L3_MISS', prefill: [0.28, 0.35, 0.35, 0.05, 0.30, 0.04, 0.32, 0.30, 0.38, 0.03, 0.40, 0.06], decode: [0.55, 0.82, 0.82, 0.08, 0.78, 0.06, 0.80, 0.54, 0.48, 0.04, 0.50, 0.08] },
-];
-
-// ─── Memory bandwidth pressure × layer stage ──────────────────────────────────
-//     Values represent relative BW demand 0..1 per data source per stage
-
-const MEMBW_ROWS: { label: string; prefill: number[]; decode: number[] }[] = [
-  // Weights — loaded once per token in prefill, every token in decode
-  { label: 'WEIGHTS',  prefill: [0.90, 0.85, 0.85, 0.00, 0.78, 0.00, 0.82, 0.88, 0.85, 0.00, 0.90, 0.00], decode: [0.95, 0.92, 0.92, 0.00, 0.88, 0.00, 0.90, 0.94, 0.92, 0.00, 0.96, 0.00] },
-  // Activations — intermediate tensors between ops
-  { label: 'ACTIV',    prefill: [0.55, 0.50, 0.50, 0.40, 0.60, 0.45, 0.62, 0.58, 0.52, 0.48, 0.55, 0.35], decode: [0.35, 0.32, 0.32, 0.28, 0.40, 0.30, 0.42, 0.38, 0.34, 0.30, 0.36, 0.22] },
-  // KV cache — minimal in prefill, dominant in decode
-  { label: 'KV_CACHE', prefill: [0.00, 0.30, 0.30, 0.00, 0.35, 0.00, 0.38, 0.00, 0.00, 0.00, 0.00, 0.00], decode: [0.00, 0.88, 0.88, 0.00, 0.92, 0.00, 0.90, 0.00, 0.00, 0.00, 0.00, 0.00] },
-  // DRAM — last resort, driven by cache misses
-  { label: 'DRAM',     prefill: [0.30, 0.38, 0.38, 0.05, 0.28, 0.04, 0.30, 0.32, 0.40, 0.03, 0.42, 0.06], decode: [0.55, 0.75, 0.75, 0.08, 0.80, 0.06, 0.82, 0.56, 0.50, 0.04, 0.52, 0.08] },
-];
-
+// ─── Subcomponent Layout Section ─────────────────────────────────────────────
 
 function PhaseSection({
-  title, icon, badge, badgeColor, time, timePercent, flops, flopsTrend,
-  intensity, intensityPoint, bytesMoved, ipc, energy, hitRate, matmul, primaryColor, isWarning, f
+  title, icon, time, timePercent, flops, flopsTrend,
+  intensity, intensityNum, bytesMoved, ipc, energy, hitRate, opShare,
+  coreUtilization, coreThreads, energyCores, energyPkg, energyPsys, avgPowerPkgW,
+  primaryColor, f, rooflineOI, rooflineAchievedGFLOPS,
 }: any) {
+  const coreThreadList = coreThreads ?? [];
+  const { state } = useAppState();
+  const peakGF = (state.peakFLOPS || 0) / 1e9;
+  const ridge = state.ridgePoint || 1;
+
   return (
     <section className="space-y-6">
       <div className="flex items-center gap-2 border-b border-outline-variant/20 pb-2">
         {icon}
         <h3 className="font-headline text-xl font-bold tracking-tight">{title}</h3>
-        <span className={`ml-auto text-[10px] px-2 py-0.5 rounded-full border font-bold ${badgeColor}`}>{badge}</span>
       </div>
       
       <div className="grid grid-cols-2 gap-4">
@@ -291,36 +247,30 @@ function PhaseSection({
           </div>
           <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">FLOPs</div>
           <div className="text-3xl font-headline font-bold text-white mt-1">{flops}</div>
-          <div className="flex items-center gap-2 mt-2">
-            <span className={`${flopsTrend.includes('↑') ? 'text-secondary' : 'text-error'} text-[10px] font-bold`}>{flopsTrend}</span>
-            <span className="text-[10px] text-on-surface-variant">vs. baseline</span>
-          </div>
         </div>
       </div>
 
       <div className="bg-surface-container p-6 rounded-lg border border-outline-variant/10">
-        <div className="flex justify-between items-center mb-6">
+        <div className="flex justify-between items-center mb-4">
           <h4 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant flex items-center gap-2">
             <span className={`w-2 h-2 rounded-full animate-pulse ${primaryColor}`}></span>
             Arithmetic Intensity
           </h4>
           <div className="text-[10px] font-mono text-outline">{intensity}</div>
         </div>
-        <div className="h-40 w-full roofline-grid border-b border-l border-outline/30 relative">
-          <svg className="absolute inset-0 w-full h-full">
-            <path d="M 0 160 L 100 80 L 400 80" fill="none" stroke="#3e4850" strokeDasharray="4 4" strokeWidth="2" />
-            <motion.circle 
-              initial={{ opacity: 0, scale: 0 }}
-              animate={{ opacity: 1, scale: 1 }}
-              cx={intensityPoint.x} 
-              cy={intensityPoint.y} 
-              fill={primaryColor === 'bg-primary' ? '#89ceff' : '#4edea3'} 
-              r="6" 
-              className="drop-shadow-[0_0_8px_currentColor]"
-            />
-          </svg>
-          <div className="absolute bottom-2 right-2 text-[8px] text-outline font-mono">Memory Bound → Compute Bound</div>
-        </div>
+        <RooflineChart
+          size="compact"
+          height={200}
+          data={{
+            arithmeticIntensity: rooflineOI ?? intensityNum ?? 0,
+            achievedGFLOPS:      rooflineAchievedGFLOPS ?? 0,
+            peakGFLOPS:          peakGF,
+            memBwGBs:            (state.memBwBs ?? 0) / 1e9,
+            ridgePoint:          ridge,
+          }}
+          dotColor={primaryColor === 'bg-primary' ? '#89ceff' : '#4edea3'}
+          className="w-full h-40"
+        />
       </div>
 
       <div className="grid grid-cols-3 gap-4">
@@ -338,36 +288,96 @@ function PhaseSection({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
-        <div className="bg-surface-container p-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+        <div className="bg-surface-container p-4 rounded-lg border border-outline-variant/10">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Core Utilization</div>
+            <div className="text-[10px] text-on-surface-variant">Average + active thread</div>
+          </div>
+          <div className="text-2xl font-headline font-bold mb-2">{f(coreUtilization)}%</div>
+          <div className="h-2 w-full rounded-full bg-surface-container-highest overflow-hidden mb-4">
+            <div className="h-full bg-secondary rounded-full" style={{ width: `${coreUtilization}%` }} />
+          </div>
+          <div className="space-y-2 text-[11px] text-on-surface-variant">
+            {coreThreadList.length > 0 ? (
+              coreThreadList.map((item: any) => (
+                <div key={`${item.socket}-${item.core}-${item.thread}`} className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="font-bold text-on-surface">{`${item.socket.replace(/_/g, ' ')} / ${item.core.replace(/_/g, ' ')}`}</div>
+                    <div className="text-[10px] text-on-surface-variant">{item.thread.replace(/_/g, ' ')}</div>
+                  </div>
+                  <div className="font-bold">{f(item.utilizationPct)}%</div>
+                </div>
+              ))
+            ) : (
+              <div className="text-[10px] text-on-surface-variant">No core utilization breakdown available.</div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-surface-container p-4 rounded-lg border border-outline-variant/10">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Energy Breakdown</div>
+            <div className="text-[10px] text-on-surface-variant">Joules / Watts</div>
+          </div>
+          <div className="space-y-2 text-[11px]">
+            <div className="flex items-center justify-between">
+              <span className="text-on-surface-variant">Package</span>
+              <span className="font-bold text-white">{fmtSI(energyPkg, 'J')}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-on-surface-variant">Cores</span>
+              <span className="font-bold text-white">{fmtSI(energyCores, 'J')}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-on-surface-variant">PSYS</span>
+              <span className="font-bold text-white">{fmtSI(energyPsys, 'J')}</span>
+            </div>
+            <div className="flex items-center justify-between pt-2 border-t border-outline-variant/10">
+              <span className="text-on-surface-variant">Avg package power</span>
+              <span className="font-bold text-white">{f(avgPowerPkgW)} W</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        <div className="bg-surface-container p-4 rounded-lg border border-outline-variant/10">
           <h4 className="text-[10px] font-bold text-on-surface-variant uppercase mb-4">LLC Efficiency</h4>
           <div className="flex items-end gap-2 mb-2">
             <div className="text-2xl font-headline font-bold">{f(hitRate)}%</div>
-            <div className={`text-[10px] mb-1 font-bold ${hitRate > 50 ? 'text-secondary' : 'text-error'}`}>HIT RATE</div>
+            <div className={`text-[10px] mb-1 font-bold ${hitRate > 50 ? 'text-secondary' : 'text-secondary'}`}>HIT RATE</div>
           </div>
           <div className="flex gap-1 h-2">
             <div className="h-full bg-secondary" style={{ width: `${hitRate}%` }}></div>
             <div className="h-full bg-error" style={{ width: `${100 - hitRate}%` }}></div>
           </div>
         </div>
-        <div className="bg-surface-container p-4 flex flex-col justify-center items-center relative">
-          <svg className="w-20 h-20 -rotate-90">
-            <circle cx="40" cy="40" fill="transparent" r="32" stroke="#2d3449" strokeWidth="8" />
-            <motion.circle 
-              initial={{ strokeDashoffset: 201 }}
-              animate={{ strokeDashoffset: 201 - (201 * matmul / 100) }}
-              transition={{ duration: 1.5 }}
-              cx="40" cy="40" fill="transparent" r="32" 
-              stroke={primaryColor === 'bg-primary' ? '#4edea3' : '#89ceff'} 
-              strokeDasharray="201" 
-              strokeWidth="8" 
-            />
-          </svg>
-          <div className="absolute inset-0 flex flex-col items-center justify-center pt-2">
-            <span className="text-xs font-bold">{matmul}%</span>
-            <span className="text-[8px] text-on-surface-variant uppercase font-bold">Matmul</span>
+
+        <div className="bg-surface-container p-4 rounded-lg border border-outline-variant/10">
+          <div className="flex items-center justify-between mb-4">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">Op Type Share</div>
           </div>
-          <div className="mt-2 text-[10px] text-on-surface-variant font-bold uppercase">Op Type Share</div>
+          <div className="space-y-4">
+            {opShare && opShare.length > 0 ? (
+              opShare.map((item: any) => (
+                <div key={item.label} className="space-y-1">
+                  <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-tight text-on-surface">
+                    <span>{item.label.replace(/_/g, ' ')}</span>
+                    <span>{f(item.timeSharePct)}%</span>
+                  </div>
+                  <div className="h-2 w-full rounded-full bg-surface-container-highest overflow-hidden">
+                    <div
+                      className={`${primaryColor} h-full rounded-full`}
+                      style={{ width: `${item.timeSharePct}%` }}
+                    />
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="text-[10px] text-on-surface-variant">No op type share data available.</div>
+            )}
+          </div>
         </div>
       </div>
     </section>

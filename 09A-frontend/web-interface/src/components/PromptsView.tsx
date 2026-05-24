@@ -27,6 +27,7 @@ export default function PromptsView({ onViewChange }: PromptsViewProps) {
   const terminalBottomRef = React.useRef<HTMLDivElement>(null);
 
   const esRef = React.useRef<EventSource | null>(null);
+  const timeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const bottomRef = React.useRef<HTMLDivElement>(null);
   const messagesRef = React.useRef(messages);
   React.useEffect(() => { messagesRef.current = messages; }, [messages]);
@@ -36,6 +37,18 @@ export default function PromptsView({ onViewChange }: PromptsViewProps) {
       terminalBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [profilingLogs, showProgressModal]);
+
+  React.useEffect(() => {
+    // Cleanup timeout on unmount
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+      if (esRef.current) {
+        esRef.current.close();
+      }
+    };
+  }, []);
 
   const isLocked = sessionId !== null;
 
@@ -53,7 +66,6 @@ export default function PromptsView({ onViewChange }: PromptsViewProps) {
     if (!trimmed) return true;
     if (trimmed.startsWith('PAPI:')) return true;
     if (/^---\s*Turn\s+\d+/.test(trimmed)) return true;
-    if (trimmed === 'User input processed.') return true;
     if (/^User \(or 'quit'/.test(trimmed)) return true;
     if (/^Re-packing/.test(trimmed)) return true;
     if (/^Final run count/.test(trimmed)) return true;
@@ -124,6 +136,10 @@ export default function PromptsView({ onViewChange }: PromptsViewProps) {
           es.close(); esRef.current = null;
           setIsRunning(false);
           setChatDone(true);
+          if (timeoutRef.current) {
+            clearTimeout(timeoutRef.current);
+            timeoutRef.current = null;
+          }
           // Flush remaining assistant buffer
           if (assistantBuffer.trim()) {
             const current = messagesRef.current;
@@ -140,6 +156,26 @@ export default function PromptsView({ onViewChange }: PromptsViewProps) {
           const line = msg.line;
 
           if (line.trim() === '[TURN_DONE]') {
+            setIsRunning(false);
+            // Flush remaining assistant buffer
+            if (assistantBuffer.trim()) {
+              const current = messagesRef.current;
+              const last = current[current.length - 1];
+              if (last?.role === 'assistant') {
+                const updated = [...current.slice(0, -1), { role: 'assistant' as const, text: assistantBuffer.trim() }];
+                set('inferenceMessages', updated); messagesRef.current = updated;
+              }
+            }
+            assistantBuffer = '';
+            return;
+          }
+
+          // Detect when the binary is ready for the next prompt
+          if (line.trim() === 'User input processed.') {
+            if (timeoutRef.current) {
+              clearTimeout(timeoutRef.current);
+              timeoutRef.current = null;
+            }
             setIsRunning(false);
             // Flush remaining assistant buffer
             if (assistantBuffer.trim()) {
@@ -206,15 +242,44 @@ export default function PromptsView({ onViewChange }: PromptsViewProps) {
     messagesRef.current = updated;
     setIsRunning(true);
 
+    // Set a timeout to prevent getting stuck if no response comes
+    timeoutRef.current = setTimeout(() => {
+      console.warn('Follow-up prompt response timeout - no input ready marker received');
+      setIsRunning(false);
+    }, 8000);
+
     try {
-      await fetch(`/api/run/prompt/${sessionId}`, {
+      const res = await fetch(`/api/run/prompt/${sessionId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: userText }),
       });
+
+      if (!res.ok) {
+        if (timeoutRef.current) {
+          clearTimeout(timeoutRef.current);
+          timeoutRef.current = null;
+        }
+        const errData = await res.json().catch(() => ({}));
+        console.error('Follow-up prompt error:', errData);
+        setIsRunning(false);
+        const errorMsg = [...messagesRef.current, { role: 'assistant' as const, text: `Error: ${errData.detail || 'Failed to send prompt'}` }];
+        set('inferenceMessages', errorMsg);
+        messagesRef.current = errorMsg;
+        return;
+      }
+
+      // Timeout will clear when response is detected
     } catch (err: any) {
-      console.error(err);
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      console.error('Follow-up prompt network error:', err);
       setIsRunning(false);
+      const errorMsg = [...messagesRef.current, { role: 'assistant' as const, text: `Error: ${err.message || 'Network error'}` }];
+      set('inferenceMessages', errorMsg);
+      messagesRef.current = errorMsg;
     }
   };
 
@@ -331,9 +396,6 @@ export default function PromptsView({ onViewChange }: PromptsViewProps) {
     <div className="p-8 space-y-8 animate-in fade-in duration-500">
       <header className="mb-8">
         <h2 className="font-headline text-3xl font-light text-primary mb-1">Prompt Orchestrator</h2>
-        <p className="text-on-surface-variant font-mono text-xs uppercase tracking-widest">
-          Direct Interface: <span className="text-secondary">Low-Latency Path</span>
-        </p>
       </header>
 
       <AnimatePresence mode="wait">
@@ -418,12 +480,9 @@ export default function PromptsView({ onViewChange }: PromptsViewProps) {
                   <div className="flex justify-between items-center mt-4">
                     <div className="flex gap-4">
                       <div className="flex items-center gap-2 text-[10px] text-on-surface-variant font-bold uppercase">
-                        <Zap className="w-3 h-3 text-secondary" />
-                        Greedy Decoding
+                    
                       </div>
                       <div className="flex items-center gap-2 text-[10px] text-on-surface-variant font-bold uppercase">
-                        <MessageSquare className="w-3 h-3 text-primary" />
-                        Context: {(contextLength / 1000).toFixed(0)}k
                       </div>
                     </div>
                     <motion.button
@@ -439,30 +498,7 @@ export default function PromptsView({ onViewChange }: PromptsViewProps) {
                   </div>
                 </div>
 
-                {/* Recent Trace History */}
-                <div className="bg-surface-container p-6 rounded-xl border border-outline-variant/10">
-                  <h3 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant mb-4 flex items-center gap-2">
-                    <History className="w-4 h-4 text-primary" />
-                    Recent Trace History
-                  </h3>
-                  <div className="space-y-3">
-                    {history.map((item) => (
-                      <div key={item.id} className="flex items-center justify-between p-3 bg-surface-container-low border border-outline-variant/10 rounded group hover:border-primary/30 transition-all cursor-pointer">
-                        <div className="flex items-center gap-4 overflow-hidden">
-                          <span className="text-[10px] font-mono text-outline">{item.time}</span>
-                          <p className="text-xs text-on-surface truncate">{item.text}</p>
-                        </div>
-                        <div className="flex items-center gap-4 pl-4">
-                          <span className="text-[10px] font-mono text-secondary font-bold">{item.tokens} TOK</span>
-                          <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button className="text-outline hover:text-primary"><Copy className="w-3 h-3" /></button>
-                            <button className="text-outline hover:text-error"><Trash2 className="w-3 h-3" /></button>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                
               </motion.div>
             ) : (
               <motion.div
@@ -618,7 +654,7 @@ export default function PromptsView({ onViewChange }: PromptsViewProps) {
 
               <div className="space-y-3">
                 <div className="flex justify-between text-[10px] font-bold uppercase">
-                  <span className="text-on-surface-variant">Max Tokens</span>
+                  <span className="text-on-surface-variant">Max tokens generated per answer</span>
                   <span className="text-primary">{maxTokens}</span>
                 </div>
                 <input
@@ -631,7 +667,7 @@ export default function PromptsView({ onViewChange }: PromptsViewProps) {
               </div>
               <div className="space-y-3">
                 <div className="flex justify-between text-[10px] font-bold uppercase">
-                  <span className="text-on-surface-variant">Papi Events per run</span>
+                  <span className="text-on-surface-variant">PAPI events per run</span>
                   <span className="text-primary">{papiEventsPerRun}</span>
                 </div>
                 <input

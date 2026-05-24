@@ -203,16 +203,29 @@ export default function LayerView() {
                 <div className="h-40 w-full roofline-grid border-b border-l border-outline/30 relative">
                   <svg className="absolute inset-0 w-full h-full">
                     <path d="M 0 160 L 100 80 L 400 80" fill="none" stroke="#3e4850" strokeDasharray="4 4" strokeWidth="2" />
-                    <motion.circle
-                      key={selected.block_id}
-                      initial={{ opacity: 0, scale: 0 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      cx={Math.min(20 + selected.arithmetic_intensity * 8, 380)}
-                      cy={80}
-                      fill={selected.block_type === 'Prefill' ? '#89ceff' : '#a8d8a8'}
-                      r="6"
-                      className="drop-shadow-[0_0_8px_currentColor]"
-                    />
+                    {/* compute dot from roofline JSON-driven hardware values */}
+                    {
+                      (() => {
+                        const peakGF = (state.peakFLOPS || 0) / 1e9;
+                        const ridge = state.ridgePoint || 1;
+                        const achieved = selected.FLOPs && selected.runtime_ms ? ((selected.FLOPs / 1e9) / (selected.runtime_ms / 1000)) : 0.0;
+                        const svgSpec = { x0: 0, y0: 64, xRidge: 100, yRidge: 80, xMax: 400, yMax: 160 };
+                        const { dotX, dotY } = computeRooflineSVG(selected.arithmetic_intensity, achieved, ridge, peakGF, svgSpec);
+                        const fill = selected.block_type === 'Prefill' ? '#89ceff' : '#a8d8a8';
+                        return (
+                          <motion.circle
+                            key={selected.block_id}
+                            initial={{ opacity: 0, scale: 0 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            cx={dotX}
+                            cy={dotY}
+                            fill={fill}
+                            r="6"
+                            className="drop-shadow-[0_0_8px_currentColor]"
+                          />
+                        );
+                      })()
+                    }
                   </svg>
                   <div className="absolute bottom-2 right-2 text-[8px] text-outline font-mono">Memory Bound → Compute Bound</div>
                 </div>

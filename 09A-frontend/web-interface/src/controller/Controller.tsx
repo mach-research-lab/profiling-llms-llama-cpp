@@ -1,7 +1,48 @@
 import { Model, PapiEvent } from '../types';
-import { AppState } from './AppContext';
+import { AppState, OpTypeShareItem, CoreThreadUtilization } from './AppContext';
 
 type SetFn = <K extends keyof AppState>(key: K, value: AppState[K]) => void;
+
+function parseOpTypeShare(phase: any): OpTypeShareItem[] {
+    const opTypeShare = phase?.op_type_share ?? {};
+    return Object.entries(opTypeShare).map(([label, details]) => {
+        const info = details as any;
+        return {
+            label,
+            timeSharePct: info?.time_share_pct ?? 0,
+            countSharePct: info?.count_share_pct ?? 0,
+            totalTimeUs: info?.total_time_us ?? 0,
+        };
+    }).sort((a, b) => b.timeSharePct - a.timeSharePct);
+}
+
+function parseCoreUtilization(phase: any): CoreThreadUtilization[] {
+    const coreUtil = phase?.core_utilization ?? {};
+    const cores: CoreThreadUtilization[] = [];
+
+    for (const [socket, socketData] of Object.entries(coreUtil)) {
+        if (typeof socketData !== 'object' || socketData === null) continue;
+        for (const [core, threadData] of Object.entries(socketData as Record<string, any>)) {
+            if (typeof threadData !== 'object' || threadData === null) continue;
+            let activeThread = '';
+            let activeUtil = 0;
+            for (const [thread, rawValue] of Object.entries(threadData as Record<string, any>)) {
+                const util = typeof rawValue === 'number' ? rawValue : Number(rawValue) || 0;
+                cores.push({ socket, core, thread, utilizationPct: util });
+                if (util > activeUtil) {
+                    activeUtil = util;
+                    activeThread = thread;
+                }
+            }
+        }
+    }
+
+    return cores.sort((a, b) => {
+        if (a.socket !== b.socket) return a.socket.localeCompare(b.socket);
+        if (a.core !== b.core) return a.core.localeCompare(b.core);
+        return a.thread.localeCompare(b.thread);
+    });
+}
 
 function avg(arr: number[]): number {
     return arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
@@ -92,11 +133,13 @@ export async function fetchAndSetPapiEvents(set: SetFn): Promise<void> {
 
 // Fetches all inference result JSON files in parallel and updates app state.
 export async function fetchAndSetResults(set: SetFn): Promise<void> {
-    const [topView, phaseView, decoderBlocks, roofline] = await Promise.all([
+    const [topView, phaseView, decoderBlocks, rooflineALL, rooflinePrefill, rooflineDecode] = await Promise.all([
         fetch('/api/top-view.json').then(r => r.json()).catch(() => ({})),
         fetch('/api/phase-view.json').then(r => r.json()).catch(() => ({})),
         fetch('/api/decoder-block-view.json').then(r => r.json()).catch(() => ([])),
-        fetch('/api/roofline.json').then(r => r.json()).catch(() => ({})),
+        fetch('/api/roofline/all').then(r => r.json()).catch(() => ({})),
+        fetch('/api/roofline/prefill').then(r => r.ok ? r.json() : {}).catch(() => ({})),
+        fetch('/api/roofline/decode').then(r => r.ok ? r.json() : {}).catch(() => ({})),
     ]);
 
     // --- top-view ---
@@ -116,7 +159,7 @@ export async function fetchAndSetResults(set: SetFn): Promise<void> {
     set('energyCoresJ',    (topView?.['energy-cores'] ?? 0) / 1_000_000);
     set('memoryUsedBytes', (topView?.peak_rss_mb ?? 0) * 1_048_576);
     set('outputTokens',    topView?.generated_tokens ?? 0);
-    set('inputTokens',     (topView?.total_tokens ?? 0) - (topView?.generated_tokens ?? 0));
+    set('totalTokens',     (topView?.total_tokens ?? 0));
     set('papiL1Misses',    topView?.PAPI_L1_TCM ?? 0);
     set('papiL2Misses',    topView?.PAPI_L2_TCM ?? 0);
     set('papiL3Misses',    topView?.PAPI_L3_TCM ?? 0);
@@ -135,6 +178,13 @@ export async function fetchAndSetResults(set: SetFn): Promise<void> {
     set('prefillEnergyJ',       (prefill?.energy?.['energy-pkg'] ?? 0) / 1_000_000);
     set('prefillHitRate',       (1 - (prefill?.LLC_miss_rate ?? 0)) * 100);
     set('prefillMatmulPct',     prefill?.op_type_share?.MUL_MAT?.time_share_pct ?? 0);
+    set('prefillOpTypeShare',   parseOpTypeShare(prefill));
+    set('prefillCoreUtilPercent', prefill?.avg_core_utilization ?? prefill?.core_utilization ?? 0);
+    set('prefillCoreThreads',   parseCoreUtilization(prefill));
+    set('prefillEnergyCoresJ',   (prefill?.energy?.['energy-cores'] ?? 0) / 1_000_000);
+    set('prefillEnergyPkgJ',     (prefill?.energy?.['energy-pkg'] ?? 0) / 1_000_000);
+    set('prefillEnergyPsysJ',    (prefill?.energy?.['energy-psys'] ?? 0) / 1_000_000);
+    set('prefillAvgPowerPkgW',   prefill?.avg_power_pkg_w ?? 0);
 
     set('decodeTimeS',          (decode?.runtime_ms ?? 0) / 1000);
     set('decodeTimePercent',    totalPhaseMs > 0 ? (decode?.runtime_ms ?? 0) / totalPhaseMs * 100 : 0);
@@ -145,6 +195,13 @@ export async function fetchAndSetResults(set: SetFn): Promise<void> {
     set('decodeEnergyJ',        (decode?.energy?.['energy-pkg'] ?? 0) / 1_000_000);
     set('decodeHitRate',        (1 - (decode?.LLC_miss_rate ?? 0)) * 100);
     set('decodeMatmulPct',      decode?.op_type_share?.MUL_MAT?.time_share_pct ?? 0);
+    set('decodeOpTypeShare',    parseOpTypeShare(decode));
+    set('decodeCoreUtilPercent', decode?.avg_core_utilization ?? decode?.core_utilization ?? 0);
+    set('decodeCoreThreads',   parseCoreUtilization(decode));
+    set('decodeEnergyCoresJ',   (decode?.energy?.['energy-cores'] ?? 0) / 1_000_000);
+    set('decodeEnergyPkgJ',     (decode?.energy?.['energy-pkg'] ?? 0) / 1_000_000);
+    set('decodeEnergyPsysJ',    (decode?.energy?.['energy-psys'] ?? 0) / 1_000_000);
+    set('decodeAvgPowerPkgW',   decode?.avg_power_pkg_w ?? 0);
     set('cacheMissPercent',     (decode?.LLC_miss_rate ?? 0) * 100);
     set('powerWatts',           decode?.avg_power_pkg_w ?? 0);
 
@@ -192,18 +249,26 @@ export async function fetchAndSetResults(set: SetFn): Promise<void> {
     set('mlpL3Accesses',    avg(decodeBlocks.map((b: any) => b?.subcomponents?.MLP?.cache_behavior?.L3_accesses ?? 0)));
 
     // --- roofline ---
-    set('arithmeticIntensity', roofline?.oi ?? 0);
-    set('achievedFLOPS',       (roofline?.achieved_gflops ?? 0) * 1e9);
-    set('peakFLOPS',           (roofline?.hardware?.peak_gflops ?? 0) * 1e9);
-    set('memBwBs',             (roofline?.hardware?.mem_bw_gbs ?? 0) * 1e9);
-    set('ridgePoint',          roofline?.hardware?.ridge_point ?? 0);
-    set('totalFLOPs',          roofline?.total_flops ?? 0);
-    set('dramBytes',           roofline?.dram_bytes ?? 0);
-    set('hwCpuModel',          roofline?.hardware?.cpu_model ?? 'N/A');
-    set('hwCores',             roofline?.hardware?.cores ?? 0);
-    set('hwBaseGHz',           roofline?.hardware?.base_ghz ?? 0);
-    set('hwBoostGHz',          roofline?.hardware?.boost_ghz ?? 0);
-    set('hwAvgGHz',            roofline?.hardware?.avg_ghz ?? 0);
-    set('hwISA',               roofline?.hardware?.isa ?? 'N/A');
-    set('hwFlopsPerCycle',     roofline?.hardware?.flops_per_cycle ?? 0);
+    set('arithmeticIntensity', rooflineALL?.oi ?? 0);
+    set('achievedFLOPS',       (rooflineALL?.achieved_gflops ?? 0) * 1e9);
+    set('peakFLOPS',           (rooflineALL?.hardware?.peak_gflops ?? 0) * 1e9);
+    set('memBwBs',             (rooflineALL?.hardware?.mem_bw_gbs ?? 0) * 1e9);
+    set('ridgePoint',          rooflineALL?.hardware?.ridge_point ?? 0);
+    set('totalFLOPs',          rooflineALL?.total_flops ?? 0);
+    set('dramBytes',           rooflineALL?.dram_bytes ?? 0);
+    set('hwCpuModel',          rooflineALL?.hardware?.cpu_model ?? 'N/A');
+    set('hwCores',             rooflineALL?.hardware?.cores ?? 0);
+    set('hwBaseGHz',           rooflineALL?.hardware?.base_ghz ?? 0);
+    set('hwBoostGHz',          rooflineALL?.hardware?.boost_ghz ?? 0);
+    set('hwAvgGHz',            rooflineALL?.hardware?.avg_ghz ?? 0);
+    set('hwISA',               rooflineALL?.hardware?.isa ?? 'N/A');
+    set('hwFlopsPerCycle',     rooflineALL?.hardware?.flops_per_cycle ?? 0);
+
+    // Prefill roofline (used by PhaseView prefill section)
+    set('prefillRooflineOI',            rooflinePrefill?.oi ?? 0);
+    set('prefillRooflineAchievedGFLOPS', rooflinePrefill?.achieved_gflops ?? 0);
+
+    // Decode roofline (used by PhaseView decode section)  
+    set('decodeRooflineOI',             rooflineDecode?.oi ?? 0);
+    set('decodeRooflineAchievedGFLOPS',  rooflineDecode?.achieved_gflops ?? 0);
 }
