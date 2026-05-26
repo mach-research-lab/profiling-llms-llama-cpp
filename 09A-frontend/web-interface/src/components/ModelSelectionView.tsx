@@ -51,7 +51,7 @@ export default function ModelSelectionView({ onViewChange }: ModelSelectionViewP
       <header className="mb-8">
         <h2 className="font-headline text-3xl font-light text-primary mb-1">Model Selection</h2>
         <p className="text-on-surface-variant font-mono text-xs uppercase tracking-widest">
-          Available Inference Engines: <span className="text-secondary">{models.length} Registered</span>
+          Available Models: <span className="text-secondary">{models.length} Registered</span>
         </p>
       </header>
 

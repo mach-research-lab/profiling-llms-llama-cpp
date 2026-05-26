@@ -10,6 +10,8 @@ import {
 import { motion } from 'motion/react';
 import { useAppState } from '@/src/controller/AppContext.tsx';
 import { fmt, fmtSI } from '@/src/controller/Controller.tsx';
+//import RooflineChart from '@/src/components/RooflineChart';
+
 
 export default function AttentionMLPView() {
   const { state } = useAppState();
@@ -61,6 +63,7 @@ export default function AttentionMLPView() {
           flops={si(attentionFLOPs, 'FLOPs')}
           flopsTrend={trend(attentionFlopsTrendPct)}
           intensity={`${f(attentionIntensity)} FLOPs/Byte`}
+          intensityNum={attentionIntensity}
           intensityPoint={{ x: 240, y: 80 }}
           bytesMoved={si(attentionBytesMoved, 'B')}
           hitRate={attentionHitRate}
@@ -88,6 +91,7 @@ export default function AttentionMLPView() {
           flops={si(mlpFLOPs, 'FLOPs')}
           flopsTrend={trend(mlpFlopsTrendPct)}
           intensity={`${f(mlpIntensity)} FLOPs/Byte`}
+          intensityNum={mlpIntensity}
           intensityPoint={{ x: 320, y: 80 }}
           bytesMoved={si(mlpBytesMoved, 'B')}
           hitRate={mlpHitRate}
@@ -136,10 +140,11 @@ export default function AttentionMLPView() {
 
 function SubBlockSection({
   title, icon, badge, badgeColor, runtime, runtimePercent, flops, flopsTrend,
-  intensity, intensityPoint, bytesMoved, hitRate, energy, l1, l2,
+  intensity,intensityNum, intensityPoint, bytesMoved, hitRate, energy, l1, l2,
   ipc, flopsPerS, l1Misses, l2Misses, l3Misses, l3Accesses,
   primaryColor, isWarning, decimalPrecision
 }: any) {
+  const { state } = useAppState();
   const f = (n: number) => fmt(n, decimalPrecision);
   const l3HitPct  = l3Accesses > 0 ? ((l3Accesses - l3Misses) / l3Accesses) * 100 : 0;
   const l3MissPct = l3Accesses > 0 ? (l3Misses / l3Accesses) * 100 : 0;
@@ -181,32 +186,34 @@ function SubBlockSection({
           </div>
         </div>
       </div>
+{/*
 
       <div className="bg-surface-container p-6 rounded-lg border border-outline-variant/10">
-        <div className="flex justify-between items-center mb-6">
-          <h4 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full animate-pulse ${primaryColor}`}></span>
-            Arithmetic Intensity
-          </h4>
-          <div className="text-[10px] font-mono text-outline">{intensity}</div>
-        </div>
-        <div className="h-40 w-full roofline-grid border-b border-l border-outline/30 relative">
-          <svg className="absolute inset-0 w-full h-full">
-            <path d="M 0 160 L 100 80 L 400 80" fill="none" stroke="#3e4850" strokeDasharray="4 4" strokeWidth="2" />
-            <motion.circle 
-              initial={{ opacity: 0, scale: 0 }}
-              animate={{ opacity: 1, scale: 1 }}
-              cx={intensityPoint.x} 
-              cy={intensityPoint.y} 
-              fill={primaryColor === 'bg-primary' ? '#89ceff' : '#ffb95f'} 
-              r="6" 
-              className="drop-shadow-[0_0_8px_currentColor]"
-            />
-          </svg>
-          <div className="absolute bottom-2 right-2 text-[8px] text-outline font-mono">Memory Bound → Compute Bound</div>
-        </div>
-      </div>
-
+    <div className="flex justify-between items-center mb-4">
+      <h4 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant flex items-center gap-2">
+        <span className={`w-2 h-2 rounded-full animate-pulse ${primaryColor}`}></span>
+        Arithmetic Intensity
+      </h4>
+      <div className="text-[10px] font-mono text-outline">{intensity}</div>
+    </div>
+    <RooflineChart
+      size="compact"
+      data={{
+        arithmeticIntensity: intensityNum ?? 0,
+        // flopsPerS is already achieved GFLOPS/s — convert to GFLOPS
+        achievedGFLOPS: (flopsPerS && typeof flopsPerS === 'number')
+          ? flopsPerS / 1e9
+          : 0,
+        peakGFLOPS: (state.peakFLOPS ?? 0) / 1e9,
+        memBwGBs:   (state.memBwBs   ?? 0) / 1e9,
+        ridgePoint:  state.ridgePoint ?? 1,
+      }}
+      dotColor={primaryColor === 'bg-primary' ? '#89ceff' : '#ffb95f'}
+      showAxes={true}
+      className="w-full h-40"
+    />
+  </div>
+*/}
       <div className="grid grid-cols-3 gap-4">
         <div className="bg-surface-container-low p-4 border border-outline-variant/10">
           <div className="text-[10px] text-on-surface-variant mb-2 font-bold uppercase">Bytes Moved</div>

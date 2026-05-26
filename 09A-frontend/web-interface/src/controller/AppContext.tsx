@@ -1,6 +1,20 @@
 import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
 import {Model, PapiEvent} from '../types';
 
+export interface OpTypeShareItem {
+  label: string;
+  timeSharePct: number;
+  countSharePct: number;
+  totalTimeUs: number;
+}
+
+export interface CoreThreadUtilization {
+  socket: string;
+  core: string;
+  thread: string;
+  utilizationPct: number;
+}
+
 export interface AppState {
   // Model / hardware
   modelName: string;
@@ -50,6 +64,11 @@ export interface AppState {
   hwAvgGHz: number;
   hwISA: string;
   hwFlopsPerCycle: number;
+  prefillRooflineOI:          number;
+  prefillRooflineAchievedGFLOPS: number;
+  decodeRooflineOI:           number;
+  decodeRooflineAchievedGFLOPS: number;
+
 
   // Energy
   totalEnergy: number;
@@ -63,7 +82,7 @@ export interface AppState {
   kvTokensUsed: number;
   kvUtilPercent: number;
   packetLossPercent: number;
-  inputTokens: number;
+  totalTokens: number;
   outputTokens: number;
   powerWatts: number;
   cpuUtilPercent: number;
@@ -80,6 +99,13 @@ export interface AppState {
   prefillEnergyJ: number;
   prefillHitRate: number;
   prefillMatmulPct: number;
+  prefillOpTypeShare: OpTypeShareItem[];
+  prefillCoreUtilPercent: number;
+  prefillCoreThreads: CoreThreadUtilization[];
+  prefillEnergyCoresJ: number;
+  prefillEnergyPkgJ: number;
+  prefillEnergyPsysJ: number;
+  prefillAvgPowerPkgW: number;
 
   // Phase – decode detail
   decodeTimeS: number;
@@ -92,6 +118,8 @@ export interface AppState {
   decodeEnergyJ: number;
   decodeHitRate: number;
   decodeMatmulPct: number;
+  decodeOpTypeShare: OpTypeShareItem[];
+  decodeCoreThreads: CoreThreadUtilization[];
 
   // Decoder block
   interBlockLatencyS: number;
@@ -179,9 +207,9 @@ const defaultState: AppState = {
   batchSize: 8,
   totalRuntimeS: 0.1124,
 
-  tokensPerSecond: 1240,
-  latencyS: 0.038,
-  throughputBs: 142e9,
+  tokensPerSecond: 0,
+  latencyS: 0,
+  throughputBs: 0,
   memoryUsedBytes: 48e9,
   memoryTotalBytes: 80e9,
 
@@ -224,7 +252,7 @@ const defaultState: AppState = {
   kvTokensUsed: 0,
   kvUtilPercent: 0,
   packetLossPercent: 0.002,
-  inputTokens: 0,
+  totalTokens: 0,
   outputTokens: 0,
   powerWatts: 422,
   cpuUtilPercent: 84.5,
@@ -241,6 +269,13 @@ const defaultState: AppState = {
   prefillEnergyJ: 42.4e-3,
   prefillHitRate: 94.2,
   prefillMatmulPct: 85,
+  prefillOpTypeShare: [],
+  prefillCoreUtilPercent: 50,
+  prefillCoreThreads: [],
+  prefillEnergyCoresJ: 3.14,
+  prefillEnergyPkgJ: 3.30,
+  prefillEnergyPsysJ: 4.22,
+  prefillAvgPowerPkgW: 50.84,
 
   // Phase – decode detail
   decodeTimeS: 0.0996,
@@ -253,6 +288,13 @@ const defaultState: AppState = {
   decodeEnergyJ: 182.8e-3,
   decodeHitRate: 41.8,
   decodeMatmulPct: 25,
+  decodeOpTypeShare: [],
+  decodeCoreUtilPercent: 50,
+  decodeCoreThreads: [],
+  decodeEnergyCoresJ: 7.66,
+  decodeEnergyPkgJ: 8.26,
+  decodeEnergyPsysJ: 11.22,
+  decodeAvgPowerPkgW: 44.36,
 
   // Decoder block
   interBlockLatencyS: 0.042,
@@ -333,7 +375,7 @@ const defaultState: AppState = {
 
   // Inference run config
   maxTokens: 528,
-  papiEventsPerRun: 1,
+  papiEventsPerRun: 10,
 
   // Display
   decimalPrecision: 2,

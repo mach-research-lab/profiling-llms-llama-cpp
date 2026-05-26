@@ -3,7 +3,7 @@ import {Info, Timer, Zap, Activity} from 'lucide-react';
 import { motion } from 'motion/react';
 import { useAppState } from "@/src/controller/AppContext.tsx";
 import { fetchAndSetModels, fetchAndSetResults, fmt, fmtSI } from "@/src/controller/Controller.tsx";
-
+import RooflineChart from '@/src/components/RooflineChart';
 
 export default function TopView() {
   const { state, set } = useAppState();
@@ -12,7 +12,7 @@ export default function TopView() {
     arithmeticIntensity, achievedFLOPS, peakFLOPS, memBwBs, ridgePoint,
     totalFLOPs, dramBytes, hwCpuModel, hwCores, hwBaseGHz, hwBoostGHz, hwAvgGHz, hwISA, hwFlopsPerCycle,
     modelSizeBytes, kvCapacityBytes, kvUsedBytes, kvTokensCapacity, kvTokensUsed, kvUtilPercent,
-    inputTokens, outputTokens, cpuUtilPercent,
+    totalTokens, outputTokens, cpuUtilPercent,
     papiL1Misses, papiL2Misses, papiL3Misses,
     energyPsysJ, energyPkgJ, energyCoresJ,
     decimalPrecision,
@@ -50,10 +50,10 @@ export default function TopView() {
       {/* Metric Cards — full width */}
       <div className="grid grid-cols-3 md:grid-cols-5 gap-6">
         <MetricCard title="Total Runtime" value={si(totalRuntimeS, 's')} icon={<Timer className="w-8 h-8" />} />
-        <MetricCard title="Token Throughput" value={f(tokensPerSecond)} unit="tok/s" trend="↑ 4.2% Peak" icon={<Activity className="w-8 h-8" />} />
+        <MetricCard title="Token Throughput" value={f(tokensPerSecond)} unit="tok/s" icon={<Activity className="w-8 h-8" />} />
 <div className="bg-surface-container p-6 rounded-lg border-l-2 border-primary">
-          <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Input Tokens</div>
-          <div className="text-2xl font-headline font-bold text-white mt-2">{inputTokens}</div>
+          <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Total Tokens</div>
+          <div className="text-2xl font-headline font-bold text-white mt-2">{totalTokens}</div>
         </div>
         <div className="bg-surface-container p-6 rounded-lg border-l-2 border-secondary">
           <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Output Tokens</div>
@@ -64,18 +64,15 @@ export default function TopView() {
       {/* Summary boxes — three columns */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
-        {/* Model Summary */}
+        {/* Inference Summary */}
         <section className="bg-surface-container p-6 rounded-lg border border-outline-variant/10 relative overflow-hidden group">
           <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
             <Zap className="w-16 h-16 text-primary" />
           </div>
           <h2 className="font-headline text-xl font-bold text-white mb-4 flex items-center gap-2">
             <Info className="w-5 h-5 text-primary" />
-            Model Summary
+            Inference Summary
           </h2>
-          <p className="text-sm text-on-surface-variant leading-relaxed mb-6">
-            Transformer-based architecture optimized for low-latency active inference. FP16 precision kernels with quantization-aware paths.
-          </p>
           <div className="grid grid-cols-2 gap-4">
             <div className="bg-surface-container-low p-4 rounded-lg border border-outline-variant/10">
               <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">Model Size</div>
@@ -181,92 +178,77 @@ export default function TopView() {
       </div>
 
       {/* Roofline */}
-      {(() => {
-        const achievedGFLOPS = achievedFLOPS / 1e9;
-        const peakGFLOPS     = peakFLOPS / 1e9;
-        const logRidge    = Math.log10(Math.max(ridgePoint, 1e-9));
-        const logXMin     = -2;
-        const logPerfMin  = -2;
-        const logPeakGF   = Math.log10(Math.max(peakGFLOPS, 1e-9));
-        const logOI       = Math.log10(Math.max(arithmeticIntensity, 1e-9));
-        const dotX = logOI <= logRidge
-          ? 100 * (logOI - logXMin) / (logRidge - logXMin)
-          : 100 + 300 * (logOI - logRidge) / (3 - logRidge);
-        const dotY = Math.min(284, Math.max(148,
-          288 - 144 * (Math.log10(Math.max(achievedGFLOPS, 1e-9)) - logPerfMin) / (logPeakGF - logPerfMin)
-        ));
-        const isMemBound = arithmeticIntensity < ridgePoint;
-        return (
-          <section className="bg-surface-container p-6 rounded-lg border border-outline-variant/10">
-            <div className="flex justify-between items-center mb-6">
-              <h4 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
-                Arithmetic Intensity — Entire Run
-              </h4>
-              <div className="text-[10px] font-mono text-outline">{f(arithmeticIntensity)} FLOPs/Byte</div>
-            </div>
-            <div className="flex gap-6">
-              <div className="flex-[2] h-72 roofline-grid border-b border-l border-outline/30 relative">
-                <svg className="absolute inset-0 w-full h-full">
-                  <path d="M 0 288 L 100 144 L 400 144" fill="none" stroke="#3e4850" strokeDasharray="4 4" strokeWidth="2" />
-                  <motion.circle
-                    initial={{ opacity: 0, scale: 0 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    cx={dotX} cy={dotY}
-                    fill="#89ceff" r="6"
-                    className="drop-shadow-[0_0_8px_#89ceff]"
-                  />
-                </svg>
-                <div className="absolute bottom-2 right-2 text-[8px] text-outline font-mono">Memory Bound → Compute Bound</div>
-                <div className={`absolute top-2 left-2 text-xs font-mono font-bold ${isMemBound ? 'text-error' : 'text-secondary'}`}>
-                  {isMemBound ? 'MEMORY BOUND' : 'COMPUTE BOUND'}
-                </div>
+      <section className="bg-surface-container p-6 rounded-lg border border-outline-variant/10">
+    <div className="flex justify-between items-center mb-6">
+      <h4 className="text-xs font-bold uppercase tracking-widest text-on-surface-variant flex items-center gap-2">
+        <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+        Arithmetic Intensity — Entire Run
+      </h4>
+      <div className="text-[10px] font-mono text-outline">
+        {f(arithmeticIntensity)} FLOPs/Byte
+      </div>
+    </div>
+    <div className="flex gap-6">
+      <div className="flex-[2]">
+        <RooflineChart
+          height={320}
+          data={{
+            arithmeticIntensity,
+            achievedGFLOPS: achievedFLOPS / 1e9,
+            peakGFLOPS:     peakFLOPS     / 1e9,
+            memBwGBs:       memBwBs       / 1e9,
+            ridgePoint,
+          }}
+          dotColor="#89ceff"
+          dotLabel={`OI:${arithmeticIntensity.toFixed(3)} — ${(achievedFLOPS/1e9).toFixed(3)}G`}
+          className="w-full h-72"
+        />
+      </div>
+ 
+      {/* Data panel — unchanged */}
+      <div className="flex-1 space-y-4 font-mono text-[10px]">
+        <div>
+          <div className="text-on-surface-variant uppercase font-bold mb-2 tracking-widest">Workload</div>
+          <div className="space-y-2">
+            {[
+              { label: 'Achieved',    value: si(achievedFLOPS, 'FLOPS/s') },
+              { label: 'Total FLOPs', value: si(totalFLOPs, 'FLOPs')      },
+              { label: 'DRAM Bytes',  value: si(dramBytes, 'B')            },
+              { label: 'OI',          value: `${f(arithmeticIntensity)} FLOPs/B` },
+            ].map(({ label, value }) => (
+              <div key={label} className="flex justify-between items-center border-b border-outline-variant/10 pb-1">
+                <span className="text-on-surface-variant">{label}</span>
+                <span className="text-white font-bold">{value}</span>
               </div>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="text-on-surface-variant uppercase font-bold mb-2 tracking-widest">Hardware</div>
+          <div className="space-y-2">
+            {[
+              { label: 'CPU',         value: hwCpuModel.split('@')[0].trim() },
+              { label: 'Cores',       value: String(hwCores)                 },
+              { label: 'Base / Boost',value: `${hwBaseGHz} / ${hwBoostGHz} GHz` },
+              { label: 'Avg Clock',   value: `${hwAvgGHz} GHz`              },
+              { label: 'ISA',         value: hwISA                           },
+              { label: 'FLOPs/Cycle', value: String(hwFlopsPerCycle)         },
+              { label: 'Peak',        value: si(peakFLOPS, 'FLOPS/s')       },
+              { label: 'Mem BW',      value: si(memBwBs, 'B/s')             },
+              { label: 'Ridge Point', value: `${f(ridgePoint)} FLOPs/B`     },
+            ].map(({ label, value }) => (
+              <div key={label} className="flex justify-between items-center border-b border-outline-variant/10 pb-1">
+                <span className="text-on-surface-variant">{label}</span>
+                <span className="text-white font-bold">{value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
 
-              {/* Data panel */}
-              <div className="flex-1 space-y-4 font-mono text-[10px]">
-                <div>
-                  <div className="text-on-surface-variant uppercase font-bold mb-2 tracking-widest">Workload</div>
-                  <div className="space-y-2">
-                    {[
-                      { label: 'Achieved', value: si(achievedFLOPS, 'FLOPS/s') },
-                      { label: 'Total FLOPs', value: si(totalFLOPs, 'FLOPs') },
-                      { label: 'DRAM Bytes', value: si(dramBytes, 'B') },
-                      { label: 'OI', value: `${f(arithmeticIntensity)} FLOPs/B` },
-                    ].map(({ label, value }) => (
-                      <div key={label} className="flex justify-between items-center border-b border-outline-variant/10 pb-1">
-                        <span className="text-on-surface-variant">{label}</span>
-                        <span className="text-white font-bold">{value}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-on-surface-variant uppercase font-bold mb-2 tracking-widest">Hardware</div>
-                  <div className="space-y-2">
-                    {[
-                      { label: 'CPU', value: hwCpuModel.split('@')[0].trim() },
-                      { label: 'Cores', value: String(hwCores) },
-                      { label: 'Base / Boost', value: `${hwBaseGHz} / ${hwBoostGHz} GHz` },
-                      { label: 'Avg Clock', value: `${hwAvgGHz} GHz` },
-                      { label: 'ISA', value: hwISA },
-                      { label: 'FLOPs/Cycle', value: String(hwFlopsPerCycle) },
-                      { label: 'Peak', value: si(peakFLOPS, 'FLOPS/s') },
-                      { label: 'Mem BW', value: si(memBwBs, 'B/s') },
-                      { label: 'Ridge Point', value: `${f(ridgePoint)} FLOPs/B` },
-                    ].map(({ label, value }) => (
-                      <div key={label} className="flex justify-between items-center border-b border-outline-variant/10 pb-1">
-                        <span className="text-on-surface-variant">{label}</span>
-                        <span className="text-white font-bold">{value}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </section>
-        );
-      })()}
+
     </div>
   );
 }

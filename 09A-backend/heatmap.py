@@ -746,6 +746,84 @@ def build_heatmap_matrix(
     )
 
 
+def matrix_to_layer_heatmap_json(
+    matrix: pd.DataFrame,
+    heatmap_kind: str,
+    title: str,
+    x_label: str,
+    value_label: str,
+    schema_version: int = 1,
+) -> dict:
+    """
+    Convert a heatmap matrix to the layer heatmap JSON schema.
+    
+    Args:
+        matrix: pandas DataFrame with op_type as index and layer as columns
+        heatmap_kind: kind of heatmap (e.g., 'time', 'memory', 'ipc')
+        title: human-readable title
+        x_label: label for x-axis (typically "Layer")
+        value_label: label for values (e.g., "time_us", "bytes", "ipc")
+        schema_version: schema version number
+    
+    Returns:
+        Dictionary in the layer heatmap JSON schema format
+    """
+    # Extract rows and columns
+    rows = [str(idx) for idx in matrix.index]
+    columns = [str(col) for col in matrix.columns]
+    
+    # Convert values to 2D array
+    values = matrix.values.astype(float).tolist()
+    
+    # Calculate color scale parameters
+    flat_values = [v for row in values for v in row if v > 0]  # Exclude zero/negative values
+    if flat_values:
+        data_min = float(np.min(matrix.values))
+        data_max = float(np.max(matrix.values))
+        vmin = float(np.percentile(flat_values, 2))
+        vmax = float(np.percentile(flat_values, 98))
+    else:
+        data_min = 0
+        data_max = 1
+        vmin = 0
+        vmax = 1
+    
+    # Determine color palette and scale based on heatmap kind
+    if heatmap_kind.lower() == "ipc":
+        palette = "viridis"
+        scale = "linear"
+    else:  # time, memory, etc.
+        palette = "YlOrRd"
+        scale = "log" if data_max / max(vmin, 1) > 100 else "linear"
+    
+    return {
+        "schema_version": schema_version,
+        "kind": heatmap_kind.lower(),
+        "title": title,
+        "x_label": x_label,
+        "y_label": "Operation type",
+        "value_label": value_label,
+        "color_scale": {
+            "palette": palette,
+            "scale": scale,
+            "label": f"{scale}-scaled {value_label}" + (" (clipped at p98)" if scale == "log" else ""),
+            "higher_is_hotter": True,
+            "zero_centered": False,
+            "data_min": data_min,
+            "data_max": data_max,
+            "vmin": vmin,
+            "vmax": vmax,
+            "clip": True,
+            "clip_percentile": 98,
+            "masked_values": "<= 0",
+            "masked_color": "#fffde7",
+        },
+        "rows": rows,
+        "columns": columns,
+        "values": values,
+    }
+
+
 def plot_heatmap(
     matrix: pd.DataFrame,
     output_path: str | os.PathLike[str],
