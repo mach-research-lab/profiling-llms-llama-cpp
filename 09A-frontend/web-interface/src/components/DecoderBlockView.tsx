@@ -1,8 +1,6 @@
 import React, { useState } from 'react';
 import {
   AlertTriangle,
-  Zap,
-  MemoryStick,
   ArrowRightLeft,
   Brain,
   Cpu,
@@ -17,7 +15,7 @@ export default function DecoderBlockView({ onViewChange }: { onViewChange: (v: V
   const { state, set } = useAppState();
   const {
     totalEnergy, memoryUsedBytes, interBlockLatencyS,
-    parallelismFactor, ioWaitState, decoderBlockList, decimalPrecision,
+    decoderBlockList, decimalPrecision,
   } = state;
   const f  = (n: number) => fmt(n, decimalPrecision);
   const si = (n: number, unit: string) => fmtSI(n, unit, decimalPrecision);
@@ -413,25 +411,12 @@ export default function DecoderBlockView({ onViewChange }: { onViewChange: (v: V
       </div>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 gap-6">
         <MetricCardSmall
           title="Inter-Block Latency"
           value={si(interBlockLatencyS, 's')}
           subtext="Avg transition between blocks"
           icon={<ArrowRightLeft className="w-8 h-8" />}
-        />
-        <MetricCardSmall
-          title="Parallelism Factor"
-          value={`${parallelismFactor}x`}
-          subtext="Attention Head Pool"
-          icon={<Zap className="w-8 h-8" />}
-        />
-        <MetricCardSmall
-          title="IO Wait State"
-          value={ioWaitState}
-          subtext="Weight Offload Bottleneck"
-          icon={<MemoryStick className="w-8 h-8" />}
-          color="text-tertiary"
         />
       </div>
     </div>

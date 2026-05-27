@@ -73,18 +73,18 @@ async function queryModels(): Promise<Model[]> {
         const response = await fetch('/api/models');
         if (!response.ok) throw new Error('Failed to fetch models');
         const data = await response.json() as { path: string; display_name: string }[];
-        
+
         return data.map(m => {
             const nameParts = m.display_name.split('/');
             const filename = nameParts[nameParts.length - 1];
-            
+
             // Extract parameter count (e.g. 1.5B or 1B)
             const paramMatch = filename.match(/(\d+(?:\.\d+)?)[Bb]/);
             const params = paramMatch ? `${paramMatch[1]}B` : '1.5B';
-            
+
             // Format name nicely
             const cleanName = filename.replace('.gguf', '').replace(/-/g, ' ');
-            
+
             return {
                 id: m.path,
                 name: cleanName,
