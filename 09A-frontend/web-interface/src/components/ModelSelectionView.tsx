@@ -84,7 +84,7 @@ export default function ModelSelectionView({ onViewChange }: ModelSelectionViewP
               </p>
               <p className="text-sm text-on-surface-variant leading-relaxed mb-8">
                 Your current prompt history and results will be cleared and you will need to run a new inference. If you wish to save the results,
-                  export the metrics using the "Export metrics" button on the results panel.
+                export the metrics using the "Export metrics" button on the results panel.
               </p>
 
               <div className="flex gap-3 justify-end">
@@ -116,11 +116,10 @@ export default function ModelSelectionView({ onViewChange }: ModelSelectionViewP
             key={model.id}
             whileHover={{ scale: 1.01 }}
             onClick={() => handleModelClick(model.id)}
-            className={`bg-surface-container p-6 rounded-xl border transition-all cursor-pointer group ${
-              model.id === selectedModelId
-                ? 'border-primary shadow-[0_0_20px_rgba(137,206,255,0.1)]'
-                : 'border-outline-variant/10 hover:border-outline-variant/30'
-            }`}
+            className={`bg-surface-container p-6 rounded-xl border transition-all cursor-pointer group ${model.id === selectedModelId
+              ? 'border-primary shadow-[0_0_20px_rgba(137,206,255,0.1)]'
+              : 'border-outline-variant/10 hover:border-outline-variant/30'
+              }`}
           >
             <div className="flex justify-between items-start mb-6">
               <div className="flex items-center gap-4">
@@ -132,9 +131,8 @@ export default function ModelSelectionView({ onViewChange }: ModelSelectionViewP
                   <div className="text-[10px] text-on-surface-variant font-mono uppercase font-bold">{model.type} Architecture</div>
                 </div>
               </div>
-              <div className={`text-[10px] px-2 py-0.5 rounded-full border font-bold uppercase ${
-                model.status === 'Active' ? 'bg-secondary/10 text-secondary border-secondary/30' : 'bg-surface-container-highest text-outline border-outline-variant/30'
-              }`}>
+              <div className={`text-[10px] px-2 py-0.5 rounded-full border font-bold uppercase ${model.status === 'Active' ? 'bg-secondary/10 text-secondary border-secondary/30' : 'bg-surface-container-highest text-outline border-outline-variant/30'
+                }`}>
                 {model.status}
               </div>
             </div>
@@ -147,13 +145,8 @@ export default function ModelSelectionView({ onViewChange }: ModelSelectionViewP
             </div>
 
             <div className="flex items-center justify-between pt-4 border-t border-outline-variant/10">
-              <div className="flex items-center gap-2">
-                <Cpu className="w-4 h-4 text-outline" />
-                <span className="text-[10px] text-on-surface-variant uppercase font-bold">Optimized for H100</span>
-              </div>
-              <button className={`flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest transition-colors ${
-                model.id === selectedModelId ? 'text-primary' : 'text-outline group-hover:text-white'
-              }`}>
+              <button className={`flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest transition-colors ${model.id === selectedModelId ? 'text-primary' : 'text-outline group-hover:text-white'
+                }`}>
                 {model.id === selectedModelId ? 'Selected' : 'Select Model'}
                 <ChevronRight className="w-4 h-4" />
               </button>
