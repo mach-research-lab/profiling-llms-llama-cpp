@@ -110,7 +110,7 @@ export default function ModelSelectionView({ onViewChange }: ModelSelectionViewP
         )}
       </AnimatePresence>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {models.map((model) => (
           <motion.div
             key={model.id}
@@ -139,18 +139,10 @@ export default function ModelSelectionView({ onViewChange }: ModelSelectionViewP
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-4 mb-6">
+            <div className="grid grid-cols-1 gap-4 mb-6">
               <div className="space-y-1">
                 <div className="text-[10px] text-on-surface-variant uppercase font-bold">Parameters</div>
                 <div className="text-lg font-headline font-bold text-white">{model.params}</div>
-              </div>
-              <div className="space-y-1">
-                <div className="text-[10px] text-on-surface-variant uppercase font-bold">Latency</div>
-                <div className="text-lg font-headline font-bold text-white">{model.latency}</div>
-              </div>
-              <div className="space-y-1">
-                <div className="text-[10px] text-on-surface-variant uppercase font-bold">Energy Profile</div>
-                <div className={`text-lg font-headline font-bold ${model.energy === 'Low' ? 'text-secondary' : 'text-white'}`}>{model.energy}</div>
               </div>
             </div>
 
