@@ -186,8 +186,12 @@ async def start_run(request: RunStartRequest):
     model_path = request.model_path
     if not os.path.isabs(model_path):
         model_path = os.path.join(MODELS_ROOT, model_path)
-    if not os.path.isfile(model_path):
-        raise HTTPException(status_code=404, detail=f"Model not found at {model_path}.")
+    resolved_model_path = os.path.abspath(model_path)
+    if not resolved_model_path.startswith(os.path.abspath(MODELS_ROOT)):
+        raise HTTPException(status_code=403, detail="Access denied: Model must be inside the models directory.")
+    if not os.path.isfile(resolved_model_path):
+        raise HTTPException(status_code=404, detail=f"Model not found at {resolved_model_path}.")
+    model_path = resolved_model_path
 
     cfg = Config(
         model_path=model_path,
@@ -698,7 +702,9 @@ async def analyze_profiling(request: AnalysisRequest):
 @router.get("/plots/{filename}")
 async def get_plot(filename: str):
     """Serve generated plot images."""
-    plot_path = os.path.join(PLOTS_DIR, filename)
+    plot_path = os.path.abspath(os.path.join(PLOTS_DIR, filename))
+    if not plot_path.startswith(os.path.abspath(PLOTS_DIR)):
+        raise HTTPException(status_code=403, detail="Access denied")
 
     if not os.path.isfile(plot_path):
         raise HTTPException(status_code=404, detail="Plot not found")
@@ -999,11 +1005,6 @@ async def get_layer_heatmap(request: HeatmapRequest):
             detail=f"Error generating layer heatmap: {str(e)}"
         )
 
-
-@router.post("/layer_heatmap", include_in_schema=False)
-async def get_layer_heatmap_alias(request: HeatmapRequest):
-    """Alias endpoint for backward compatibility."""
-    return await get_layer_heatmap(request)
 
 app.include_router(router)
 
