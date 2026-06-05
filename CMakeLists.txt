@@ -53,3 +53,18 @@ if(NOT EXISTS ${STREAM_BINARY})
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/stream
     )
 endif()
+
+find_program(NPM_EXECUTABLE npm)
+if(NPM_EXECUTABLE)
+    message(STATUS "Building React frontend...")
+    execute_process(
+        COMMAND ${NPM_EXECUTABLE} install
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/09A-frontend/web-interface
+    )
+    execute_process(
+        COMMAND ${NPM_EXECUTABLE} run build
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/09A-frontend/web-interface
+    )
+else()
+    message(WARNING "npm not found — frontend will not be built. Install Node.js to enable the GUI.")
+endif()

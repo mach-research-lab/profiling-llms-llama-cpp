@@ -19,8 +19,8 @@ import argparse
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LLAMA_ROOT = os.path.dirname(SCRIPT_DIR)
-DEFAULT_DB  = os.path.join(LLAMA_ROOT, "profiling_data.db")
-DEFAULT_OUT = "profiling_export.csv"
+DEFAULT_DB  = os.path.join(LLAMA_ROOT, "run_every_view_results/tensor_op_view.db")
+DEFAULT_OUT = os.path.join(LLAMA_ROOT, "run_every_view_results/profiling_tensor_export.csv")
 
 
 def get_runs(conn):
