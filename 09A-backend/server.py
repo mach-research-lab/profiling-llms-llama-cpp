@@ -4,9 +4,10 @@ FastAPI server for PAPI profiling frontend.
 Provides API endpoints to list models and run profiling.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import subprocess, threading, uuid, asyncio
 import os
@@ -25,12 +26,11 @@ from heatmap import (
     normalize_measurements,
     matrix_to_layer_heatmap_json,
 )
-from Roofline_api import (
-    find_decoder_block_json, load_json, sum_blocks, roofline_from_aggregated,
-    get_hardware as _rf_get_hardware,
-)
+import Roofline
 
 app = FastAPI()
+
+router = APIRouter(prefix="/api")
 
 # Enable CORS for frontend
 app.add_middleware(
@@ -49,6 +49,10 @@ BINARY = os.path.join(LLAMA_ROOT, "build/bin/llama-papi")
 MODELS_ROOT = os.path.join(LLAMA_ROOT, "models")
 PLOTS_DIR = os.path.join(SCRIPT_DIR, "plots")
 os.makedirs(PLOTS_DIR, exist_ok=True)
+
+# Frontend dist path (mounted later so API routes keep precedence)
+FRONTEND_DIST = os.path.join(SCRIPT_DIR, "..", "09A-frontend", "web-interface", "dist")
+
 
 AVAILABLE_EVENTS = get_available_events()
 
@@ -83,12 +87,27 @@ def find_models():
     return sorted(glob.glob(pattern, recursive=True))
 
 
-@app.get("/")
+@router.get("/health")
 async def root():
     return {"message": "PAPI Profiler API"}
 
+@app.get("/api/roofline/compute")
+async def compute_roofline():
+    """Compute a roofline JSON using the helpers in Roofline.py and available decoder-block JSON.
+    Falls back to returning a 404 if the decoder-block JSON is missing.
+    """
+    json_path = Roofline.find_decoder_block_json()
+    if not json_path or not os.path.isfile(json_path):
+        raise HTTPException(status_code=404, detail="decoder-block-view.json not found for roofline computation")
+    data = Roofline.load_json(json_path)
+    if not isinstance(data, list) or len(data) == 0:
+        raise HTTPException(status_code=400, detail="decoder-block-view.json is empty or invalid")
+    agg = Roofline.sum_blocks(data)
+    result = Roofline.roofline_from_aggregated(agg, "Entire program")
+    return result
 
-@app.get("/models", response_model=List[ModelInfo])
+
+@router.get("/models", response_model=List[ModelInfo])
 async def get_models():
     """Get list of available models."""
     models = find_models()
@@ -104,7 +123,7 @@ async def get_models():
     ]
 
 
-@app.get("/events")
+@router.get("/events")
 async def get_events():
     """Get list of available PAPI events."""
     return [
@@ -132,7 +151,7 @@ class SendPromptRequest(BaseModel):
     prompt: str
 
 
-@app.post("/run/start")
+@router.post("/run/start")
 async def start_run(request: RunStartRequest):
     """Start ONLY the phase-view binary in conversation mode for interactive chat."""
     session_id = str(uuid.uuid4())
@@ -242,7 +261,7 @@ async def start_run(request: RunStartRequest):
     return {"sessionId": session_id}
 
 
-@app.get("/run/stream/{session_id}")
+@router.get("/run/stream/{session_id}")
 async def stream_run(session_id: str):
     """SSE endpoint — streams stdout lines for a session."""
     session = active_sessions.get(session_id)
@@ -264,7 +283,7 @@ async def stream_run(session_id: str):
     )
 
 
-@app.post("/run/cancel")
+@router.post("/run/cancel")
 async def cancel_runs():
     """Cancel all active sessions and terminate their running processes."""
     count = 0
@@ -292,7 +311,7 @@ async def cancel_runs():
     return {"terminated_count": count}
 
 
-@app.post("/run/prompt/{session_id}")
+@router.post("/run/prompt/{session_id}")
 async def send_prompt(session_id: str, body: SendPromptRequest):
     """Send a follow-up prompt to the running chat process via stdin."""
     session = active_sessions.get(session_id)
@@ -307,7 +326,7 @@ async def send_prompt(session_id: str, body: SendPromptRequest):
     return {"ok": True}
 
 
-@app.post("/run/profile/{session_id}")
+@router.post("/run/profile/{session_id}")
 async def run_profile(session_id: str):
     """End the chat (send 'quit') and run remaining profiling views.
     Returns a new SSE stream with profiling progress.
@@ -448,24 +467,24 @@ async def run_profile(session_id: str):
                     queue.put({"line": "===== Generating Roofline Data ====="}), loop)
                 decoder_path = os.path.join(RESULTS_DIR, "decoder-block-view.json")
                 if os.path.isfile(decoder_path):
-                    data = load_json(decoder_path)
+                    data = Roofline.load_json(decoder_path)
                     # All blocks combined
-                    agg_all = sum_blocks(data)
-                    roofline_all_data = roofline_from_aggregated(agg_all, "Entire program")
+                    agg_all = Roofline.sum_blocks(data)
+                    roofline_all_data = Roofline.roofline_from_aggregated(agg_all, "Entire program")
                     with open(os.path.join(RESULTS_DIR, "roofline.json"), "w") as f:
                         json.dump(roofline_all_data, f, indent=2)
                     # Prefill blocks
                     prefill_blocks = [b for b in data if b.get("block_type") == "Prefill"]
                     if prefill_blocks:
-                        agg_prefill = sum_blocks(prefill_blocks)
-                        roofline_prefill_data = roofline_from_aggregated(agg_prefill, "Entire Prefill")
+                        agg_prefill = Roofline.sum_blocks(prefill_blocks)
+                        roofline_prefill_data = Roofline.roofline_from_aggregated(agg_prefill, "Entire Prefill")
                         with open(os.path.join(RESULTS_DIR, "roofline-prefill.json"), "w") as f:
                             json.dump(roofline_prefill_data, f, indent=2)
                     # Decode blocks
                     decode_blocks = [b for b in data if b.get("block_type") == "Decode"]
                     if decode_blocks:
-                        agg_decode = sum_blocks(decode_blocks)
-                        roofline_decode_data = roofline_from_aggregated(agg_decode, "Entire Decode")
+                        agg_decode = Roofline.sum_blocks(decode_blocks)
+                        roofline_decode_data = Roofline.roofline_from_aggregated(agg_decode, "Entire Decode")
                         with open(os.path.join(RESULTS_DIR, "roofline-decode.json"), "w") as f:
                             json.dump(roofline_decode_data, f, indent=2)
                     asyncio.run_coroutine_threadsafe(
@@ -573,7 +592,7 @@ def calculate_roofline_metrics(metrics: dict, mem_bandwidth: float):
     return arithmetic_intensity, performance
 
 
-@app.get("/hardware")
+@router.get("/hardware")
 async def get_hardware():
     """Get list of available hardware profiles."""
     return [
@@ -582,7 +601,7 @@ async def get_hardware():
     ]
 
 
-@app.post("/analyze")
+@router.post("/analyze")
 async def analyze_profiling(request: AnalysisRequest):
     """
     Generate hardcoded roofline plot examples.
@@ -676,7 +695,7 @@ async def analyze_profiling(request: AnalysisRequest):
         raise HTTPException(status_code=500, detail=f"Error generating plot: {str(e)}")
 
 
-@app.get("/plots/{filename}")
+@router.get("/plots/{filename}")
 async def get_plot(filename: str):
     """Serve generated plot images."""
     plot_path = os.path.join(PLOTS_DIR, filename)
@@ -687,7 +706,7 @@ async def get_plot(filename: str):
     return FileResponse(plot_path, media_type="image/png")
 
 
-@app.get("/measurements.csv")
+@router.get("/measurements.csv")
 async def get_measurements():
     """Serve the measurements CSV file."""
     csv_path = os.path.join(LLAMA_ROOT, "measurements.csv")
@@ -697,7 +716,7 @@ async def get_measurements():
 
     return FileResponse(csv_path, media_type="text/csv")
 
-@app.get("/cpu_info")
+@router.get("/cpu_info")
 async def get_cpu_info():
     """Get CPU architecture and model name using lscpu."""
     try:
@@ -718,7 +737,7 @@ async def get_cpu_info():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting CPU info: {str(e)}")
 
-@app.get("/roofline_data")
+@router.get("/roofline_data")
 async def get_roofline_data():
     """Serve hardcoded roofline data for frontend visualization."""
     # This is a placeholder endpoint. In the future, this will serve actual data derived from PAPI profiling.
@@ -743,28 +762,28 @@ async def get_roofline_data():
 
 RESULTS_DIR = os.path.join(LLAMA_ROOT, "run_every_view_results")
 
-@app.get("/top-view.json")
+@router.get("/top-view.json")
 async def get_top_view():
     path = os.path.join(RESULTS_DIR, "top-view.json")
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="top-view.json not found. Run profiling first.")
     return FileResponse(path, media_type="application/json")
 
-@app.get("/phase-view.json")
+@router.get("/phase-view.json")
 async def get_phase_view():
     path = os.path.join(RESULTS_DIR, "phase-view.json")
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="phase-view.json not found. Run profiling first.")
     return FileResponse(path, media_type="application/json")
 
-@app.get("/decoder-block-view.json")
+@router.get("/decoder-block-view.json")
 async def get_decoder_block_view():
     path = os.path.join(RESULTS_DIR, "decoder-block-view.json")
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="decoder-block-view.json not found. Run profiling first.")
     return FileResponse(path, media_type="application/json")
 
-@app.get("/roofline/all")
+@router.get("/roofline/all")
 async def get_roofline_all():
     path = os.path.join(RESULTS_DIR, "roofline.json")
     if not os.path.isfile(path):
@@ -772,7 +791,7 @@ async def get_roofline_all():
     with open(path) as f:
         return json.load(f)
 
-@app.get("/roofline/prefill")
+@router.get("/roofline/prefill")
 async def get_roofline_prefill():
     path = os.path.join(RESULTS_DIR, "roofline-prefill.json")
     if not os.path.isfile(path):
@@ -780,7 +799,7 @@ async def get_roofline_prefill():
     with open(path) as f:
         return json.load(f)
 
-@app.get("/roofline/decode")
+@router.get("/roofline/decode")
 async def get_roofline_decode():
     path = os.path.join(RESULTS_DIR, "roofline-decode.json")
     if not os.path.isfile(path):
@@ -788,38 +807,38 @@ async def get_roofline_decode():
     with open(path) as f:
         return json.load(f)
 
-@app.get("/roofline/prefill/{block_id}")
+@router.get("/roofline/prefill/{block_id}")
 async def get_roofline_prefill_block(block_id: int):
     decoder_path = os.path.join(RESULTS_DIR, "decoder-block-view.json")
     if not os.path.isfile(decoder_path):
         raise HTTPException(status_code=404, detail="No profiling data. Run profiling first.")
-    data = load_json(decoder_path)
+    data = Roofline.load_json(decoder_path)
     block = next((b for b in data if b.get("block_type") == "Prefill" and b.get("block_id") == block_id), None)
     if not block:
         available = [b["block_id"] for b in data if b.get("block_type") == "Prefill"]
         raise HTTPException(status_code=404, detail=f"Prefill block {block_id} not found. Available: {available}")
     agg = {"total_flops": block["FLOPs"], "dram_bytes": block["bytes_moved"], "time_seconds": block["runtime_ns"] / 1e9}
-    return roofline_from_aggregated(agg, f"Prefill block {block_id}")
+    return Roofline.roofline_from_aggregated(agg, f"Prefill block {block_id}")
 
-@app.get("/roofline/decode/{block_id}")
+@router.get("/roofline/decode/{block_id}")
 async def get_roofline_decode_block(block_id: int):
     decoder_path = os.path.join(RESULTS_DIR, "decoder-block-view.json")
     if not os.path.isfile(decoder_path):
         raise HTTPException(status_code=404, detail="No profiling data. Run profiling first.")
-    data = load_json(decoder_path)
+    data = Roofline.load_json(decoder_path)
     block = next((b for b in data if b.get("block_type") == "Decode" and b.get("block_id") == block_id), None)
     if not block:
         available = [b["block_id"] for b in data if b.get("block_type") == "Decode"]
         raise HTTPException(status_code=404, detail=f"Decode block {block_id} not found. Available: {available}")
     agg = {"total_flops": block["FLOPs"], "dram_bytes": block["bytes_moved"], "time_seconds": block["runtime_ns"] / 1e9}
-    return roofline_from_aggregated(agg, f"Decode block {block_id}")
+    return Roofline.roofline_from_aggregated(agg, f"Decode block {block_id}")
 
-@app.get("/phases")
+@router.get("/phases")
 async def get_phases():
     decoder_path = os.path.join(RESULTS_DIR, "decoder-block-view.json")
     if not os.path.isfile(decoder_path):
         raise HTTPException(status_code=404, detail="No profiling data. Run profiling first.")
-    data = load_json(decoder_path)
+    data = Roofline.load_json(decoder_path)
     return {
         "prefill_blocks": [b["block_id"] for b in data if b.get("block_type") == "Prefill"],
         "decode_blocks":  [b["block_id"] for b in data if b.get("block_type") == "Decode"],
@@ -871,7 +890,7 @@ def convert_matrix_to_heatmap_tab(matrix, label: str):
     }
 
 
-@app.post("/api/heatmap")
+@router.post("/heatmap")
 async def get_heatmap(request: HeatmapRequest):
     """Generate heatmap data from profiling results."""
     try:
@@ -926,7 +945,7 @@ async def get_heatmap(request: HeatmapRequest):
         )
 
 
-@app.post("/api/layer_heatmap")
+@router.post("/layer_heatmap")
 async def get_layer_heatmap(request: HeatmapRequest):
     """Generate layer heatmap data in JSON schema format."""
     try:
@@ -981,10 +1000,17 @@ async def get_layer_heatmap(request: HeatmapRequest):
         )
 
 
-@app.post("/layer_heatmap", include_in_schema=False)
+@router.post("/layer_heatmap", include_in_schema=False)
 async def get_layer_heatmap_alias(request: HeatmapRequest):
     """Alias endpoint for backward compatibility."""
     return await get_layer_heatmap(request)
+
+app.include_router(router)
+
+# Mount frontend static files at root so `/` serves index.html and assets are available.
+if os.path.isdir(FRONTEND_DIST):
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+
 
 
 if __name__ == "__main__":

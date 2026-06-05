@@ -29,3 +29,11 @@ models/*
 !models/.gitignore
 
 
+.claude/
+
+
+#Ignore local PAPI build output
+papi-install/
+papi/src/*.o
+papi/src/*.a
+papi/src/*.so*

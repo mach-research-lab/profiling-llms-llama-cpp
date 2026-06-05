@@ -5,13 +5,12 @@ target_compile_features(utils PRIVATE cxx_std_17)
 target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT})
 
 # ── llama-papi ──────────────────────────────────────────────────────────────
-find_package(SQLite3 REQUIRED)
 set(TARGET llama-papi)
 add_executable(${TARGET} llama-papi.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
-target_include_directories(${TARGET} PRIVATE /usr/local/include)
-target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} papi /usr/local/lib/libpapi.so SQLite::SQLite3 utils)
+target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} 
+    ${CMAKE_SOURCE_DIR}/papi-install/lib/libpapi.a sqlite3 utils)
 
 # ── kv-measure ───────────────────────────────────────────────────────────────
 set(TARGET kv-measure)
@@ -32,18 +31,21 @@ set(TARGET llama-measurement-top-view)
 add_executable(${TARGET} llama-measurement-top-view.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
-target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} papi /usr/local/lib/libpapi.so utils)
+target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} 
+    ${CMAKE_SOURCE_DIR}/papi-install/lib/libpapi.a sqlite3 utils)
 
 # ── llama-measurement-phase-view ─────────────────────────────────────────────────────────────
 set(TARGET llama-measurement-phase-view)
 add_executable(${TARGET} llama-measurement-phase-view.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
-target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} papi /usr/local/lib/libpapi.so utils)
+target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} 
+    ${CMAKE_SOURCE_DIR}/papi-install/lib/libpapi.a sqlite3 utils)
 
 # ── llama-measurement-decoder-block-view ─────────────────────────────────────────────────────────────
 set(TARGET llama-measurement-decoder-block-view)
 add_executable(${TARGET} llama-measurement-decoder-block-view.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
-target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} papi /usr/local/lib/libpapi.so utils)
+target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT} 
+    ${CMAKE_SOURCE_DIR}/papi-install/lib/libpapi.a sqlite3 utils)

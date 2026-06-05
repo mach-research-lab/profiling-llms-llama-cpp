@@ -6,3 +6,6 @@
 	path = stream
 	url = https://github.com/jeffhammond/STREAM
 	branch = master
+[submodule "papi"]
+	path = papi
+	url = https://github.com/icl-utk-edu/papi.git

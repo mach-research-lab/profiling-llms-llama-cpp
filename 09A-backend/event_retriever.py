@@ -4,10 +4,20 @@
 import subprocess
 import sys
 import re
+import os
+
+# Path to local papi install, relative to this script's location
+SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
+LLAMA_ROOT  = os.path.dirname(SCRIPT_DIR)
+PAPI_BIN = os.path.join(LLAMA_ROOT, "papi-install", "bin")
+
+def papi_cmd(cmd):
+    local = os.path.join(PAPI_BIN, cmd)
+    return local if os.path.exists(local) else cmd
 
 #Get whole print from papi_avail
-papi_events = subprocess.run(["papi_avail"], capture_output=True, text=True)
-papi_events_detailed = subprocess.run(["papi_avail", "-d"], capture_output=True, text=True)
+papi_events = subprocess.run([papi_cmd("papi_avail")], capture_output=True, text=True)
+papi_events_detailed = subprocess.run([papi_cmd("papi_avail"), "-d"], capture_output=True, text=True)
 
 #Number of hardware counters available
 hardware_counters = 0
@@ -90,7 +100,7 @@ def bin_pack_events(events_with_cost, capacity):
 # Validate runs using papi_event_chooser
 def validate_run(event_group):
     result = subprocess.run(
-        ["papi_event_chooser", "PRESET"] + event_group,
+        [papi_cmd("papi_event_chooser"), "PRESET"] + event_group,
         capture_output=True, text=True
     )
     
