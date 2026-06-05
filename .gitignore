@@ -29,3 +29,4 @@ models/*
 !models/.gitignore
 
 
+.claude/
