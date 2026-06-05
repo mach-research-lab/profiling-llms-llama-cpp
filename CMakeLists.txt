@@ -15,3 +15,41 @@ add_subdirectory(llama.cpp)
 
 # Our tools
 add_subdirectory(09A-backend/llama-measuring)
+
+# Build SQLite
+add_library(sqlite3 STATIC sqlite-local/sqlite3.c)
+target_include_directories(sqlite3 PUBLIC sqlite-local)
+
+# Build PAPI
+set(PAPI_INSTALL_DIR ${CMAKE_SOURCE_DIR}/papi-install)
+if(NOT EXISTS ${PAPI_INSTALL_DIR}/lib/libpapi.a)
+    message(STATUS "Building PAPI from source...")
+    execute_process(
+        COMMAND ./configure --prefix=${PAPI_INSTALL_DIR}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/papi/src
+    )
+    execute_process(
+        COMMAND make -j
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/papi/src
+    )
+    execute_process(
+        COMMAND make install
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/papi/src
+    )
+endif()
+
+add_library(papi STATIC IMPORTED GLOBAL)
+set_target_properties(papi PROPERTIES
+    IMPORTED_LOCATION ${PAPI_INSTALL_DIR}/lib/libpapi.a
+    INTERFACE_INCLUDE_DIRECTORIES ${PAPI_INSTALL_DIR}/include
+)
+
+# Build Stream
+set(STREAM_BINARY ${CMAKE_SOURCE_DIR}/stream/stream_c.exe)
+if(NOT EXISTS ${STREAM_BINARY})
+    message(STATUS "Building Stream benchmark...")
+    execute_process(
+        COMMAND make
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/stream
+    )
+endif()
