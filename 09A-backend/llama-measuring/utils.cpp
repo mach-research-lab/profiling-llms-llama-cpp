@@ -41,31 +41,19 @@ Parsed_Args extract_args(int & argc, char ** argv) {
             parsed_args.no_csv = true;
         } else if (std::strcmp(argv[i], "--user-prompts") == 0 && i + 1 < argc) {
             std::string arg(argv[i + 1]);
-            // Strip surrounding brackets if present: ["hello", "world"] -> "hello", "world"
-            if (!arg.empty() && arg.front() == '[') arg = arg.substr(1);
-            if (!arg.empty() && arg.back()  == ']') arg.pop_back();
-            size_t start = 0;
-            while (start < arg.size()) {
-                // Skip whitespace and commas
-                while (start < arg.size() && (arg[start] == ',' || arg[start] == ' ')) start++;
-                if (start >= arg.size()) break;
-                // Expect an opening quote
-                if (arg[start] == '"') {
-                    start++; // skip opening quote
-                    size_t end = arg.find('"', start);
-                    if (end == std::string::npos) end = arg.size();
-                    parsed_args.user_prompts.push_back(arg.substr(start, end - start));
-                    start = end + 1; // skip closing quote
-                } else {
-                    // Unquoted token: read until comma or end
-                    size_t end = arg.find(',', start);
-                    if (end == std::string::npos) end = arg.size();
-                    std::string token = arg.substr(start, end - start);
-                    // Trim trailing whitespace
-                    token.erase(token.find_last_not_of(" \t") + 1);
-                    if (!token.empty()) parsed_args.user_prompts.push_back(token);
-                    start = end;
+            try {
+                auto j = nlohmann::json::parse(arg);
+                if (j.is_array()) {
+                    for (const auto& item : j) {
+                        if (item.is_string()) {
+                            parsed_args.user_prompts.push_back(item.get<std::string>());
+                        }
+                    }
+                } else if (j.is_string()) {
+                    parsed_args.user_prompts.push_back(j.get<std::string>());
                 }
+            } catch (...) {
+                parsed_args.user_prompts.push_back(arg);
             }
             i++; // skip the value
 
@@ -83,8 +71,9 @@ Parsed_Args extract_args(int & argc, char ** argv) {
 
 CoreStat read_core_stat(int core_id) {
     FILE* f = fopen("/proc/stat", "r");
-    char line[256];
     CoreStat s = {};
+    if (!f) return s;
+    char line[256];
     while (fgets(line, sizeof(line), f)) {
         char label[16];
         // Lines look like: "cpu0 1234 56 789 ..."

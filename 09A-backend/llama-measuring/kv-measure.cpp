@@ -99,6 +99,7 @@ int main(int argc, char ** argv) {
     printf("Prefill (%zu tokens)...\n", tokens.size());
     if (llama_decode(ctx, llama_batch_get_one(tokens.data(), (int)tokens.size()))) {
         LOG_ERR("%s: prefill failed\n", __func__);
+        fclose(csv);
         return 1;
     }
     write_row("prefill", 0, (int)tokens.size());

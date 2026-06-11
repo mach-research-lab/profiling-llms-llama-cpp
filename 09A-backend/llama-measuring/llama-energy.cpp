@@ -331,6 +331,7 @@ int main(int argc, char ** argv) {
 
     if (llama_decode(ctx, llama_batch_get_one(tokens.data(), (int)tokens.size()))) {
         LOG_ERR("%s: prefill failed\n", __func__);
+        fclose(cb_data.out_file);
         return 1;
     }
     printf("Prefill done.\n");
